@@ -94,6 +94,7 @@ static event_trigger_support_data event_trigger_support[] = {
 	{"CONVERSION", true},
 	{"DATABASE", false},
 	{"DOMAIN", true},
+	{"DISK QUOTA", true},
 	{"EXTENSION", true},
 	{"EVENT TRIGGER", false},
 	{"FOREIGN DATA WRAPPER", true},
