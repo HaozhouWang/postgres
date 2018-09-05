@@ -34,6 +34,7 @@
 #include "commands/copy.h"
 #include "commands/createas.h"
 #include "commands/dbcommands.h"
+#include "commands/diskquotacmd.h"
 #include "commands/defrem.h"
 #include "commands/discard.h"
 #include "commands/event_trigger.h"
@@ -204,6 +205,8 @@ check_xact_readonly(Node *parsetree)
 		case T_CreateExtensionStmt:
 		case T_AlterExtensionStmt:
 		case T_AlterExtensionContentsStmt:
+		case T_CreateDiskQuotaStmt:
+		case T_DropDiskQuotaStmt:
 		case T_CreateFdwStmt:
 		case T_AlterFdwStmt:
 		case T_CreateForeignServerStmt:
@@ -1385,6 +1388,16 @@ ProcessUtilitySlow(ParseState *pstate,
 														 &secondaryObject);
 				break;
 
+			case T_CreateDiskQuotaStmt:
+				CreateDiskQuota((CreateDiskQuotaStmt *) parsetree);
+				commandCollected = true;
+				break;
+
+			case T_DropDiskQuotaStmt:
+				DropDiskQuota((DropDiskQuotaStmt *) parsetree);
+				commandCollected = true;
+				break;
+
 			case T_CreateFdwStmt:
 				address = CreateForeignDataWrapper((CreateFdwStmt *) parsetree);
 				break;
@@ -2214,6 +2227,14 @@ CreateCommandTag(Node *parsetree)
 			tag = "ALTER EXTENSION";
 			break;
 
+		case T_CreateDiskQuotaStmt:
+			tag = "CREATE DISK QUOTA";
+			break;
+
+		case T_DropDiskQuotaStmt:
+			tag = "DROP DISK QUOTA";
+			break;
+
 		case T_CreateFdwStmt:
 			tag = "CREATE FOREIGN DATA WRAPPER";
 			break;
@@ -2996,6 +3017,11 @@ GetCommandLogLevel(Node *parsetree)
 		case T_CreateExtensionStmt:
 		case T_AlterExtensionStmt:
 		case T_AlterExtensionContentsStmt:
+			lev = LOGSTMT_DDL;
+			break;
+
+		case T_CreateDiskQuotaStmt:
+		case T_DropDiskQuotaStmt:
 			lev = LOGSTMT_DDL;
 			break;
 
