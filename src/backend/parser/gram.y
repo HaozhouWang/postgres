@@ -258,6 +258,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 		CreateDomainStmt CreateExtensionStmt CreateGroupStmt CreateOpClassStmt
 		CreateOpFamilyStmt AlterOpFamilyStmt CreatePLangStmt
 		CreateSchemaStmt CreateSeqStmt CreateStmt CreateStatsStmt CreateTableSpaceStmt
+		CreateDiskQuotaStmt DropDiskQuotaStmt
 		CreateFdwStmt CreateForeignServerStmt CreateForeignTableStmt
 		CreateAssertStmt CreateTransformStmt CreateTrigStmt CreateEventTrigStmt
 		CreateUserStmt CreateUserMappingStmt CreateRoleStmt CreatePolicyStmt
@@ -406,6 +407,11 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <node>	grouping_sets_clause
 %type <node>	opt_publication_for_tables publication_for_tables
 %type <value>	publication_name_item
+
+%type <list>    quota_option_list
+%type <ival>    db_type_elem
+%type <str>     obj_name
+%type <str>     quota_option_elem
 
 %type <list>	opt_fdw_options fdw_options
 %type <defelt>	fdw_option
@@ -625,7 +631,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 	DATA_P DATABASE DAY_P DEALLOCATE DEC DECIMAL_P DECLARE DEFAULT DEFAULTS
 	DEFERRABLE DEFERRED DEFINER DELETE_P DELIMITER DELIMITERS DEPENDS DESC
-	DETACH DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P
+	DETACH DICTIONARY DISABLE_P DISCARD DISK DISTINCT DO DOCUMENT_P DOMAIN_P
 	DOUBLE_P DROP
 
 	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ESCAPE EVENT EXCEPT
@@ -666,7 +672,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	POSITION PRECEDING PRECISION PRESERVE PREPARE PREPARED PRIMARY
 	PRIOR PRIVILEGES PROCEDURAL PROCEDURE PROCEDURES PROGRAM PUBLICATION
 
-	QUOTE
+	QUOTA QUOTE
 
 	RANGE READ REAL REASSIGN RECHECK RECURSIVE REF REFERENCES REFERENCING
 	REFRESH REINDEX RELATIVE_P RELEASE RENAME REPEATABLE REPLACE REPLICA
@@ -863,6 +869,7 @@ stmt :
 			| CreateAssertStmt
 			| CreateCastStmt
 			| CreateConversionStmt
+			| CreateDiskQuotaStmt
 			| CreateDomainStmt
 			| CreateExtensionStmt
 			| CreateFdwStmt
@@ -898,6 +905,7 @@ stmt :
 			| DoStmt
 			| DropAssertStmt
 			| DropCastStmt
+			| DropDiskQuotaStmt
 			| DropOpClassStmt
 			| DropOpFamilyStmt
 			| DropOwnedStmt
@@ -4768,6 +4776,66 @@ AlterExtensionContentsStmt:
 					$$ = (Node *)n;
 				}
 		;
+
+/*****************************************************************************
+ *
+ *		QUERY:
+ *             CREATE DISK QUOTA name ON obj_type obj_name WITH options_list
+ *
+ *****************************************************************************/
+
+CreateDiskQuotaStmt: CREATE DISK QUOTA name ON db_type_elem obj_name opt_with '(' quota_option_list ')'
+					{
+						 CreateDiskQuotaStmt *n = makeNode(CreateDiskQuotaStmt);
+						 n->quotaname = $4;
+						 n->dbobjtype = $6;
+						 n->objname = $7;
+						 n->options = $10;
+						 $$ = (Node *)n;
+					}
+			;
+
+obj_name:
+		Sconst                              { $$ = $1; }
+	;
+
+db_type_elem:
+		TABLE                               { $$ = DISK_QUOTA_TABLE; }
+		| SCHEMA                            { $$ = DISK_QUOTA_SCHEMA; }
+		| USER                              { $$ = DISK_QUOTA_USER; }
+	;
+
+quota_option_elem:
+		Sconst                              { $$ = $1; }
+	;
+
+quota_option_list:
+		quota_option_elem                               { $$ = list_make1(makeStringConst($1, @1)); }
+		| quota_option_list ',' quota_option_elem       { $$ = lappend($1, makeStringConst($3, @3)); }
+	;
+
+/*****************************************************************************
+ *
+ *		QUERY:
+ *             DROP DISK QUOTA name
+ *
+ *****************************************************************************/
+
+DropDiskQuotaStmt: DROP DISK QUOTA name
+					{
+						DropDiskQuotaStmt *n = makeNode(DropDiskQuotaStmt);
+						n->quotaname = $4;
+						n->missing_ok = false;
+						$$ = (Node *) n;
+					}
+					|  DROP DISK QUOTA IF_P EXISTS name
+					{
+						DropDiskQuotaStmt *n = makeNode(DropDiskQuotaStmt);
+						n->quotaname = $6;
+						n->missing_ok = true;
+						$$ = (Node *) n;
+					}
+	;
 
 /*****************************************************************************
  *
@@ -15066,6 +15134,7 @@ unreserved_keyword:
 			| DICTIONARY
 			| DISABLE_P
 			| DISCARD
+			| DISK
 			| DOCUMENT_P
 			| DOMAIN_P
 			| DOUBLE_P
@@ -15186,6 +15255,7 @@ unreserved_keyword:
 			| PROCEDURES
 			| PROGRAM
 			| PUBLICATION
+			| QUOTA
 			| QUOTE
 			| RANGE
 			| READ

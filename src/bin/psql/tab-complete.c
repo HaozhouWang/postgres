@@ -1205,6 +1205,7 @@ static const pgsql_thing_t words_after_create[] = {
 	{"DATABASE", Query_for_list_of_databases},
 	{"DEFAULT PRIVILEGES", NULL, NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
 	{"DICTIONARY", Query_for_list_of_ts_dictionaries, NULL, NULL, THING_NO_SHOW},
+	{"DISK QUOTA", NULL, NULL, NULL},
 	{"DOMAIN", NULL, NULL, &Query_for_list_of_domains},
 	{"EVENT TRIGGER", NULL, NULL, NULL},
 	{"EXTENSION", Query_for_list_of_extensions},
