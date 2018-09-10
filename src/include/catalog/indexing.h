@@ -365,7 +365,7 @@ DECLARE_UNIQUE_INDEX(pg_diskquota_oid_index, 6127, on pg_diskquota using btree(o
 DECLARE_UNIQUE_INDEX(pg_diskquota_name_index, 6124, on pg_diskquota using btree(quotaname name_ops));
 #define DiskQuotaNameIndexId 6124
 
-DECLARE_UNIQUE_INDEX(pg_diskquota_capability_oid_index, 6126, on pg_diskquota using btree(oid oid_ops));
+DECLARE_UNIQUE_INDEX(pg_diskquota_capability_oid_index, 6126, on pg_diskquota_capability using btree(oid oid_ops));
 #define QuotaCapabilityOidIndexId 6126
 DECLARE_UNIQUE_INDEX(pg_diskquota_capability_quotaid_index, 6125, on pg_diskquota_capability using btree(quotaid oid_ops));
 #define QuotaCapabilityQuotaIdIndexId 6125
