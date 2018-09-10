@@ -352,7 +352,7 @@ InitProcess(void)
 	 * cleaning up.  (XXX autovac launcher currently doesn't participate in
 	 * this; it probably should.)
 	 */
-	if (IsUnderPostmaster && !IsAutoVacuumLauncherProcess())
+	if (IsUnderPostmaster && !IsAutoVacuumLauncherProcess() && !IsDiskQuotaLauncherProcess())
 		MarkPostmasterChildActive();
 
 	/*

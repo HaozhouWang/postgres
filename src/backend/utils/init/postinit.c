@@ -38,6 +38,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/diskquota.h"
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
@@ -321,7 +322,7 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 	 *
 	 * We do not enforce them for autovacuum worker processes either.
 	 */
-	if (IsUnderPostmaster && !IsAutoVacuumWorkerProcess())
+	if (IsUnderPostmaster && !IsAutoVacuumWorkerProcess() && !IsDiskQuotaWorkerProcess())
 	{
 		/*
 		 * Check that the database is currently allowing connections.
@@ -671,7 +672,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	before_shmem_exit(ShutdownPostgres, 0);
 
 	/* The autovacuum launcher is done here */
-	if (IsAutoVacuumLauncherProcess())
+	if (IsAutoVacuumLauncherProcess()|| IsDiskQuotaLauncherProcess())
 	{
 		/* report this backend in the PgBackendStatus array */
 		pgstat_bestart();
@@ -711,7 +712,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 * In standalone mode and in autovacuum worker processes, we use a fixed
 	 * ID, otherwise we figure it out from the authenticated user name.
 	 */
-	if (bootstrap || IsAutoVacuumWorkerProcess())
+	if (bootstrap || IsAutoVacuumWorkerProcess() || IsDiskQuotaWorkerProcess())
 	{
 		InitializeSessionUserIdStandalone();
 		am_superuser = true;

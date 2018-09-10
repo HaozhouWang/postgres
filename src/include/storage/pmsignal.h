@@ -31,6 +31,8 @@ typedef enum
 	PMSIGNAL_BACKGROUND_WORKER_CHANGE,	/* background worker state change */
 	PMSIGNAL_START_WALRECEIVER, /* start a walreceiver */
 	PMSIGNAL_ADVANCE_STATE_MACHINE, /* advance postmaster's state machine */
+	PMSIGNAL_START_DISKQUOTA_LAUNCHER,    /* start an diskquota launcher */
+	PMSIGNAL_START_DISKQUOTA_WORKER,  /* start an diskquota worker */
 
 	NUM_PMSIGNALS				/* Must be last value of enum! */
 } PMSignalReason;

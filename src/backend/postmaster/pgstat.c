@@ -48,6 +48,7 @@
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/diskquota.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
@@ -2833,6 +2834,16 @@ pgstat_bestart(void)
 			/* Autovacuum Worker */
 			beentry->st_backendType = B_AUTOVAC_WORKER;
 		}
+		else if (IsDiskQuotaLauncherProcess())
+		{
+			/* DiskQuota Launcher */
+			beentry->st_backendType = B_DISKQUOTA_LAUNCHER;
+		}
+		else if (IsDiskQuotaWorkerProcess())
+		{
+			/* DiskQuota Worker */
+			beentry->st_backendType = B_DISKQUOTA_WORKER;
+		}
 		else if (am_walsender)
 		{
 			/* Wal sender */
@@ -3483,6 +3494,9 @@ pgstat_get_wait_activity(WaitEventActivity w)
 		case WAIT_EVENT_AUTOVACUUM_MAIN:
 			event_name = "AutoVacuumMain";
 			break;
+		case WAIT_EVENT_DISKQUOTA_MAIN:
+			event_name = "DiskQuotaMain";
+			break;
 		case WAIT_EVENT_BGWRITER_HIBERNATE:
 			event_name = "BgWriterHibernate";
 			break;
@@ -4107,6 +4121,12 @@ pgstat_get_backend_desc(BackendType backendType)
 			break;
 		case B_AUTOVAC_WORKER:
 			backendDesc = "autovacuum worker";
+			break;
+		case B_DISKQUOTA_LAUNCHER:
+			backendDesc = "diskquota launcher";
+			break;
+		case B_DISKQUOTA_WORKER:
+			backendDesc = "diskquota worker";
 			break;
 		case B_BACKEND:
 			backendDesc = "client backend";

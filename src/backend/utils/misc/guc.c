@@ -59,6 +59,7 @@
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/bgwriter.h"
+#include "postmaster/diskquota.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/syslogger.h"
 #include "postmaster/walwriter.h"
@@ -183,6 +184,7 @@ static const char *show_tcp_keepalives_count(void);
 static bool check_maxconnections(int *newval, void **extra, GucSource source);
 static bool check_max_worker_processes(int *newval, void **extra, GucSource source);
 static bool check_autovacuum_max_workers(int *newval, void **extra, GucSource source);
+static bool check_diskquota_max_workers(int *newval, void **extra, GucSource source);
 static bool check_autovacuum_work_mem(int *newval, void **extra, GucSource source);
 static bool check_effective_io_concurrency(int *newval, void **extra, GucSource source);
 static void assign_effective_io_concurrency(int newval, void *extra);
@@ -1327,6 +1329,16 @@ static struct config_bool ConfigureNamesBool[] =
 			NULL
 		},
 		&autovacuum_start_daemon,
+		true,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"diskquota", PGC_SIGHUP, AUTOVACUUM,
+			gettext_noop("Starts the diskquota subprocess."),
+			NULL
+		},
+		&diskquota_start_daemon,
 		true,
 		NULL, NULL, NULL
 	},
@@ -2866,6 +2878,16 @@ static struct config_int ConfigureNamesInt[] =
 		&autovacuum_max_workers,
 		3, 1, MAX_BACKENDS,
 		check_autovacuum_max_workers, NULL, NULL
+	},
+	{
+		/* see max_connections */
+		{"diskquota_max_workers", PGC_POSTMASTER, DISKQUOTA,
+			gettext_noop("Sets the maximum number of simultaneously running diskquota worker processes."),
+			NULL
+		},
+		&diskquota_max_workers,
+		1, 1, MAX_BACKENDS,
+		check_diskquota_max_workers, NULL, NULL
 	},
 
 	{
@@ -10626,6 +10648,14 @@ check_maxconnections(int *newval, void **extra, GucSource source)
 
 static bool
 check_autovacuum_max_workers(int *newval, void **extra, GucSource source)
+{
+	if (MaxConnections + *newval + 1 + max_worker_processes > MAX_BACKENDS)
+		return false;
+	return true;
+}
+
+static bool
+check_diskquota_max_workers(int *newval, void **extra, GucSource source)
 {
 	if (MaxConnections + *newval + 1 + max_worker_processes > MAX_BACKENDS)
 		return false;
