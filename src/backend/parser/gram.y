@@ -409,9 +409,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <value>	publication_name_item
 
 %type <list>    quota_option_list
-%type <ival>    db_type_elem
 %type <str>     obj_name
-%type <str>     quota_option_elem
+%type <defelt>  quota_option_elem
 
 %type <list>	opt_fdw_options fdw_options
 %type <defelt>	fdw_option
@@ -4784,14 +4783,35 @@ AlterExtensionContentsStmt:
  *
  *****************************************************************************/
 
-CreateDiskQuotaStmt: CREATE DISK QUOTA name ON db_type_elem obj_name opt_with '(' quota_option_list ')'
+CreateDiskQuotaStmt: CREATE DISK QUOTA name ON TABLE qualified_name opt_with '(' quota_option_list ')'
 					{
 						 CreateDiskQuotaStmt *n = makeNode(CreateDiskQuotaStmt);
 						 n->quotaname = $4;
-						 n->dbobjtype = $6;
-						 n->objname = $7;
+						 n->dbobjtype = DISK_QUOTA_TABLE;
+						 n->table = $7;
+						 n->objname = NULL;
 						 n->options = $10;
 						 $$ = (Node *)n;
+					}
+					|  CREATE DISK QUOTA name ON SCHEMA obj_name opt_with '(' quota_option_list ')'
+					{
+						CreateDiskQuotaStmt *n = makeNode(CreateDiskQuotaStmt);
+						n->quotaname = $4;
+						n->dbobjtype = DISK_QUOTA_SCHEMA;
+						n->table = NULL;
+						n->objname = $7;
+						n->options = $10;
+						$$ = (Node *)n;
+					}
+					|  CREATE DISK QUOTA name ON USER obj_name opt_with '(' quota_option_list ')'
+					{
+						CreateDiskQuotaStmt *n = makeNode(CreateDiskQuotaStmt);
+						n->quotaname = $4;
+						n->dbobjtype = DISK_QUOTA_USER;
+						n->table = NULL;
+						n->objname = $7;
+						n->options = $10;
+						$$ = (Node *)n;
 					}
 			;
 
@@ -4799,19 +4819,16 @@ obj_name:
 		Sconst                              { $$ = $1; }
 	;
 
-db_type_elem:
-		TABLE                               { $$ = DISK_QUOTA_TABLE; }
-		| SCHEMA                            { $$ = DISK_QUOTA_SCHEMA; }
-		| USER                              { $$ = DISK_QUOTA_USER; }
-	;
-
 quota_option_elem:
-		Sconst                              { $$ = $1; }
+		ColLabel '=' Sconst
+		{
+			$$ = makeDefElem($1, (Node *)makeStringConst($3, @3), @1);
+		}
 	;
 
 quota_option_list:
-		quota_option_elem                               { $$ = list_make1(makeStringConst($1, @1)); }
-		| quota_option_list ',' quota_option_elem       { $$ = lappend($1, makeStringConst($3, @3)); }
+		quota_option_elem                               { $$ = list_make1($1); }
+		| quota_option_list ',' quota_option_elem       { $$ = lappend($1, $3); }
 	;
 
 /*****************************************************************************

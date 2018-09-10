@@ -24,8 +24,7 @@ extern void DropDiskQuota(DropDiskQuotaStmt *stmt);
 
 /* catalog access function */
 extern char *GetDiskQuotaName(Oid quotaid);
-extern Oid GetDiskQuotaOidByName(const char *name,
-							bool missing_ok);
+extern Oid GetDiskQuotaOidByName(const char *name);
 
 
 #endif //POSTGRES_DISKQUOTA_H

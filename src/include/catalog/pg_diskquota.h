@@ -20,22 +20,24 @@
 
 #include "catalog/genbki.h"
 #include "catalog/pg_diskquota_d.h"
+
 /* ----------------
  *	pg_diskquota definition.  cpp turns this into
  *	typedef struct FormData_pg_diskquota
  * ----------------
  */
+
 typedef enum DiskQuotaType
 {
-        DISKQUOTA_TYPE_UNKNOWN = 0,
+	DISKQUOTA_TYPE_UNKNOWN = -1,
 
-        DISKQUOTA_TYPE_TABLE,
+	DISKQUOTA_TYPE_TABLE = 0,
 
-        DISKQUOTA_TYPE_SCHEMA,
+	DISKQUOTA_TYPE_SCHEMA = 1,
 
-	DISKQUOTA_TYPE_DATABASE,
+	DISKQUOTA_TYPE_DATABASE = 3,
 
-	DISKQUOTA_TYPE_ROLE,
+	DISKQUOTA_TYPE_ROLE = 2,
 
 } DiskQuotaType;
 
@@ -62,9 +64,9 @@ typedef FormData_pg_diskquota *Form_pg_diskquota;
 
 typedef enum DiskQuotaLimitType
 {
-        DISKQUOTA_LIMIT_TYPE_UNKNOWN = 0,
+	DISKQUOTA_LIMIT_TYPE_UNKNOWN = -1,
 
-        DISKQUOTA_LIMIT_TYPE_EXPECTED,		/* expected quota limit on a db object*/
+	DISKQUOTA_LIMIT_TYPE_EXPECTED,		/* expected quota limit on a db object*/
 
 	DISKQUOTA_LIMIT_TYPE_REDZONE,		/* redzone limit, warning when disk usage of a db object is high*/
 
