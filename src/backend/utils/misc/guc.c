@@ -3310,6 +3310,16 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
+		{"diskquota_databases", PGC_USERSET,DISKQUOTA,
+			gettext_noop("Database list for disk quota monitoring."),
+			NULL,
+		},
+		&_guc_dq_database_list,
+		"postgres,test1",
+		NULL, NULL, NULL
+	},
+
+	{
 		{"log_line_prefix", PGC_SIGHUP, LOGGING_WHAT,
 			gettext_noop("Controls information prefixed to each log line."),
 			gettext_noop("If blank, no prefix is used.")

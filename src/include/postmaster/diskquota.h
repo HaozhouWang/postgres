@@ -27,6 +27,7 @@ typedef enum
 
 
 /* GUC variables */
+extern char *_guc_dq_database_list;
 extern bool diskquota_start_daemon;
 extern int	diskquota_max_workers;
 extern int	diskquota_work_mem;

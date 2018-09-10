@@ -110,6 +110,7 @@
 /*
  * GUC parameters
  */
+char *_guc_dq_database_list = NULL;
 bool		diskquota_start_daemon = true;
 int			diskquota_max_workers;
 int			diskquota_work_mem = -1;
@@ -474,6 +475,7 @@ DiskQuotaLauncherMain(int argc, char *argv[])
 	/* Identify myself via ps */
 	init_ps_display(pgstat_get_backend_desc(B_DISKQUOTA_LAUNCHER), "", "", "");
 	elog(WARNING, "worker hubert4");
+    elog(WARNING, "_guc_dq_databases='%s'\n", _guc_dq_database_list);
 	ereport(DEBUG1,
 			(errmsg("diskquota launcher started")));
 
