@@ -119,6 +119,8 @@ pg_db_role_setting|t
 pg_default_acl|t
 pg_depend|t
 pg_description|t
+pg_diskquota|t
+pg_diskquota_capability|t
 pg_enum|t
 pg_event_trigger|t
 pg_extension|t
