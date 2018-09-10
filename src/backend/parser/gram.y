@@ -4816,13 +4816,13 @@ CreateDiskQuotaStmt: CREATE DISK QUOTA name ON TABLE qualified_name opt_with '('
 			;
 
 obj_name:
-		Sconst                              { $$ = $1; }
+		ColLabel                              { $$ = $1; }
 	;
 
 quota_option_elem:
 		ColLabel '=' Sconst
 		{
-			$$ = makeDefElem($1, (Node *)makeStringConst($3, @3), @1);
+			$$ = makeDefElem($1, (Node *)makeString($3), @1);
 		}
 	;
 
