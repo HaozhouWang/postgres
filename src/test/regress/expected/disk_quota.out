@@ -1,0 +1,47 @@
+--
+-- Regression tests for disk quota
+--
+CREATE SCHEMA test_ns_disk_quota
+       CREATE TABLE quota_1 (
+              a int,
+              b int
+       );
+CREATE TABLE quota_2 (
+        a                       int2,
+        b                       float4
+);
+CREATE ROLE test_user_quota_1;
+CREATE DISK QUOTA abc ON TABLE quota_2 WITH ();
+ERROR:  syntax error at or near ")"
+LINE 1: CREATE DISK QUOTA abc ON TABLE quota_2 WITH ();
+                                                     ^
+CREATE DISK QUOTA abc ON TABLE quota_2 WITH (abc='100M');
+ERROR:  unknown disk quota option abc
+CREATE DISK QUOTA abc ON TABLE quota_2 WITH (quota='100M', abc='100M');
+ERROR:  duplicate quota settings
+CREATE DISK QUOTA abc ON TABLE quota_2 WITH (quota='100M', quota='200M');
+ERROR:  duplicate quota settings
+CREATE DISK QUOTA abc ON TABLE quota_2 WITH (quota='100M');
+CREATE DISK QUOTA abc ON TABLE quota_2 WITH (quota='100M');
+ERROR:  disk quota entry "abc" already exists
+CREATE DISK QUOTA abc_error ON TABLE quota_1 WITH (quota='100M');
+ERROR:  could not create disk quota, TABLE 'quota_1' does not exist
+CREATE DISK QUOTA abc_error ON SCHEMA quota_1 WITH (quota='100M');
+ERROR:  could not create disk quota, SCHEMA 'quota_1' does not exist
+CREATE DISK QUOTA abc_error ON USER quota_1 WITH (quota='100M');
+ERROR:  could not create disk quota, USER 'quota_1' does not exist
+CREATE DISK QUOTA abc ON SCHEMA test_ns_disk_quota WITH (quota='100M');
+ERROR:  disk quota entry "abc" already exists
+CREATE DISK QUOTA abc_1 ON SCHEMA test_ns_disk_quota WITH (quota='100M');
+CREATE DISK QUOTA abc_2 ON TABLE test_ns_disk_quota.quota_1 WITH (quota='100M');
+CREATE DISK QUOTA abc_3 ON USER test_user_quota_1 WITH (quota='100M');
+DROP DISK QUOTA abc;
+DROP DISK QUOTA abc_1;
+DROP DISK QUOTA abc_2;
+DROP DISK QUOTA abc_3;
+DROP DISK QUOTA abc_no;
+ERROR:  disk quota abc_no does not exist
+DROP SCHEMA test_ns_disk_quota CASCADE;
+NOTICE:  drop cascades to table test_ns_disk_quota.quota_1
+DROP TABLE quota_2;
+DROP ROLE test_user_quota_1;

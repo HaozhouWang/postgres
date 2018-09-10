@@ -38,6 +38,8 @@
 #include "catalog/pg_default_acl.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_description.h"
+#include "catalog/pg_diskquota.h"
+#include "catalog/pg_diskquota_capability.h"
 #include "catalog/pg_enum.h"
 #include "catalog/pg_event_trigger.h"
 #include "catalog/pg_foreign_data_wrapper.h"
@@ -374,6 +376,50 @@ static const struct cachedesc cacheinfo[] = {
 			0
 		},
 		8
+	},
+	{DiskQuotaCapabilityRelationId,		/* DISKQUOTACAPOID */
+		QuotaCapabilityOidIndexId,
+		1,
+		{
+			ObjectIdAttributeNumber,
+			0,
+			0,
+			0
+		},
+		16
+	},
+	{DiskQuotaCapabilityRelationId,		/* DISKQUOTACAPQUOTAID */
+		QuotaCapabilityQuotaIdIndexId,
+		1,
+		{
+			Anum_pg_diskquota_capability_quotaid,
+			0,
+			0,
+			0
+		},
+		16
+	},
+	{DiskQuotaRelationId,		/* DISKQUOTANAME */
+		DiskQuotaNameIndexId,
+		1,
+		{
+			Anum_pg_diskquota_quotaname,
+			0,
+			0,
+			0
+		},
+		16
+	},
+	{DiskQuotaRelationId,		/* DISKQUOTAOID */
+		DiskQuotaOidIndexId,
+		1,
+		{
+			ObjectIdAttributeNumber,
+			0,
+			0,
+			0
+		},
+		16
 	},
 	{EnumRelationId,			/* ENUMOID */
 		EnumOidIndexId,
