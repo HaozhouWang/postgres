@@ -44,6 +44,7 @@ void CreateDiskQuota(CreateDiskQuotaStmt *stmt)
 	HeapTuple	tuple;
 	Oid			ownerId;
 	ListCell   *cell;
+	bool        quota_set = false;
 
 
 	disk_quota_rel = heap_open(DiskQuotaRelationId, RowExclusiveLock);
@@ -153,19 +154,35 @@ void CreateDiskQuota(CreateDiskQuotaStmt *stmt)
 	{
 		DefElem    *def = (DefElem *) lfirst(cell);
 
-		if (strcmp(def->defname, "quota") == 0)
+		if (strcmp(def->defname, "quota") == 0 && quota_set == false)
 		{
 			cap_values[Anum_pg_diskquota_capability_quotaid - 1] = ObjectIdGetDatum(disk_quota_oid);
 			cap_values[Anum_pg_diskquota_capability_quotalimittype - 1] =
 				Int16GetDatum((int16) DISKQUOTA_LIMIT_TYPE_EXPECTED);
-			cap_values[Anum_pg_diskquota_capability_quotavalue - 1] = CStringGetDatum(strVal(def->arg));
+			cap_values[Anum_pg_diskquota_capability_quotavalue - 1] = CStringGetTextDatum(strVal(def->arg));
+			quota_set = true;
 		}
 		else
 		{
-			ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("Unknown disk quota option %s", def->defname)));
+			if (quota_set)
+			{
+				ereport(ERROR,
+						(errmsg("duplicate quota settings")));
+
+			} else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("unknown disk quota option %s", def->defname)));
+			}
+
 		}
+	}
+
+	if (!quota_set) {
+		ereport(ERROR,
+			(errmsg("quota is not set in option"),
+			 errhint("Add quota='size' in option")));
 	}
 
 	tuple = heap_form_tuple(disk_quota_cap_rel->rd_att, cap_values, cap_nulls);
@@ -198,7 +215,7 @@ void DropDiskQuota(DropDiskQuotaStmt *stmt)
 		else
 		{
 			ereport(ERROR,
-				(errmsg("cache lookup failed for disk quota %s", stmt->quotaname)));
+				(errmsg("disk quota %s does not exist", stmt->quotaname)));
 		}
 	}
 
