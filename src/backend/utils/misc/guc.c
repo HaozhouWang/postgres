@@ -2886,7 +2886,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&diskquota_max_workers,
-		1, 1, MAX_BACKENDS,
+		3, 1, MAX_BACKENDS,
 		check_diskquota_max_workers, NULL, NULL
 	},
 
@@ -3315,7 +3315,7 @@ static struct config_string ConfigureNamesString[] =
 			NULL,
 		},
 		&_guc_dq_database_list,
-		"postgres,test1",
+		"postgres,test0,test1",
 		NULL, NULL, NULL
 	},
 

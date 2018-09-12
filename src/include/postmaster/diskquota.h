@@ -16,16 +16,6 @@
 
 #include "storage/block.h"
 
-/*
- * Other processes can request specific work from diskquota, identified by
- * DiskQuotaWorkItem elements.
- */
-typedef enum
-{
-	DQW_BRINSummarizeRange
-} DiskQuotaWorkItemType;
-
-
 /* GUC variables */
 extern char *_guc_dq_database_list;
 extern bool diskquota_start_daemon;
@@ -72,8 +62,6 @@ extern void DiskquotaWorkerIAm(void);
 extern void DiskquotaLauncherIAm(void);
 #endif
 
-extern bool DiskQuotaRequestWork(DiskQuotaWorkItemType type,
-					  Oid relationId, BlockNumber blkno);
 
 /* shared memory stuff */
 extern Size DiskQuotaShmemSize(void);
