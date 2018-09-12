@@ -2886,7 +2886,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&diskquota_max_workers,
-		1, 1, MAX_BACKENDS,
+		3, 1, MAX_BACKENDS,
 		check_diskquota_max_workers, NULL, NULL
 	},
 
@@ -3307,6 +3307,16 @@ static struct config_string ConfigureNamesString[] =
 		&client_encoding_string,
 		"SQL_ASCII",
 		check_client_encoding, assign_client_encoding, NULL
+	},
+
+	{
+		{"diskquota_databases", PGC_USERSET,DISKQUOTA,
+			gettext_noop("Database list for disk quota monitoring."),
+			NULL,
+		},
+		&_guc_dq_database_list,
+		"postgres,test0,test1",
+		NULL, NULL, NULL
 	},
 
 	{

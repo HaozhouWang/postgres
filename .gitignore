@@ -1,6 +1,7 @@
 # Global excludes across all subdirectories
 *.o
 *.obj
+*.swp
 *.bc
 *.so
 *.so.[0-9]
@@ -29,6 +30,7 @@ coverage-html-stamp
 *.vcxproj
 win32ver.rc
 *.exe
+.gitignore
 lib*dll.def
 lib*.pc
 
