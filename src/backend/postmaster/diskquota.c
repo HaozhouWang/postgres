@@ -177,6 +177,39 @@ struct LocalBlackMapEntry
 	bool		isexceeded;
 };
 
+/*
+ * Hash table for O(1) t_id -> tsa_entry lookup
+ */
+static HTAB *pgstat_table_map = NULL;
+static HTAB *pgstat_active_table_map = NULL;
+
+typedef struct DiskQuotaLocalTableCache
+{
+	Oid			tableid;
+	PgStat_Counter tuples_inserted;
+	PgStat_Counter tuples_updated;
+	PgStat_Counter tuples_deleted;
+	PgStat_Counter vacuum_count;
+	PgStat_Counter autovac_vacuum_count;
+
+} DiskQuotaLocalTableCache;
+
+typedef struct DiskQuotaActiveHashEntry
+{
+	Oid			t_id;
+	PgStat_Counter t_refcount;
+} DiskQuotaActiveHashEntry;
+
+
+/*
+ * pgstat_table_map entry: map from relation OID to PgStat_TableStatus pointer
+ */
+typedef struct DiskQuotaStateHashEntry
+{
+	Oid			t_id;
+	DiskQuotaLocalTableCache t_entry;
+} DiskQuotaStatHashEntry;
+
 /* using hash table to support incremental update the table size entry.*/
 static HTAB *table_size_map = NULL;
 static HTAB *namespace_size_map = NULL;
@@ -218,6 +251,7 @@ typedef struct DiskQuotaWorkItem
 } DiskQuotaWorkItem;
 
 #define NUM_WORKITEMS	256
+#define INIT_WORKING_TABLE_SIZE 64
 
 /*-------------
  * The main diskquota shmem struct.  On shared memory we store this main
@@ -282,12 +316,13 @@ static void calculate_role_disk_usage();
 static void flush_local_black_map();
 static void reset_local_black_map();
 static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, int8 diskquota_type);
-static bool is_in_active_table_list();
 static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
 static void update_namespace_map(Oid namespaceoid, int64 updatesize);
 static void update_role_map(Oid owneroid, int64 updatesize);
 static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
+static bool check_table_is_active(Oid reloid);
+static void build_active_table_map();
 /********************************************************************
  *					  DISKQUOTA LAUNCHER CODE
  ********************************************************************/
@@ -1101,7 +1136,6 @@ init_disk_quota_model(void)
 										   "Disk quotas model context",
 										   ALLOCSET_DEFAULT_SIZES);
 
-
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(TableSizeEntry);
@@ -1139,6 +1173,36 @@ init_disk_quota_model(void)
 									MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
 									&hash_ctl,
 									HASH_ELEM | HASH_CONTEXT | HASH_BLOBS);
+	/* Prepare the hash table */
+	if (pgstat_table_map == NULL)
+	{
+		HASHCTL ctl;
+
+		memset(&ctl, 0, sizeof(ctl));
+
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(DiskQuotaStatHashEntry);
+
+		pgstat_table_map = hash_create("disk quota Table State Entry lookup hash table",
+		                            NUM_WORKITEMS,
+		                            &ctl,
+		                            HASH_ELEM | HASH_BLOBS);
+	}
+
+	if (pgstat_active_table_map == NULL)
+	{
+		HASHCTL ctl;
+
+		memset(&ctl, 0, sizeof(ctl));
+
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(DiskQuotaActiveHashEntry);
+
+		pgstat_active_table_map = hash_create("disk quota Active Table Entry lookup hash table",
+		                             INIT_WORKING_TABLE_SIZE,
+		                             &ctl,
+		                             HASH_ELEM | HASH_BLOBS);
+	}
 
 	refresh_disk_quota_model();
 }
@@ -1226,11 +1290,6 @@ reset_local_black_map()
 
 }
 
-static bool is_in_active_table_list()
-{
-	return true;
-}
-
 static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, int8 diskquota_type)
 {
 	bool					found;
@@ -1313,6 +1372,26 @@ update_role_map(Oid owneroid, int64 updatesize)
 
 }
 
+static void
+add_to_pgstat_map(Oid relOid)
+{
+	DiskQuotaStatHashEntry *entry;
+	bool found;
+
+	entry = hash_search(pgstat_table_map, &relOid, HASH_ENTER, &found);
+
+	if (!found)
+	{
+		memset(&entry->t_entry, 0, sizeof(entry->t_entry));
+	}
+}
+
+static void 
+remove_pgstat_map(Oid relOid)
+{
+	hash_search(pgstat_table_map, &relOid, HASH_REMOVE, NULL);
+}
+
 /*
  *  Incremental way to update the disk quota of every database objects
  *  Recalculate the table's disk usage when it's a new table or be update.
@@ -1363,8 +1442,10 @@ calculate_table_disk_usage()
 			tsentry->totalsize = calculate_total_relation_size_by_oid(relOid);
 			update_namespace_map(tsentry->namespaceoid, tsentry->totalsize);
 			update_role_map(tsentry->owneroid, tsentry->totalsize);
+			/* add to pgstat_table_map hash map */
+			add_to_pgstat_map(relOid);
 		}
-		else if (is_in_active_table_list())
+		else if (check_table_is_active(tsentry->reloid))
 		{
 			/* if table size is modified*/
 			int64 oldtotalsize = tsentry->totalsize;
@@ -1410,6 +1491,7 @@ calculate_table_disk_usage()
 			hash_search(table_size_map,
 					&tsentry->reloid,
 					HASH_REMOVE, NULL);
+			remove_pgstat_map(tsentry->reloid);
 			continue;
 		}
 		ReleaseSysCache(tuple);	
@@ -1457,6 +1539,58 @@ static void calculate_role_disk_usage()
 		ReleaseSysCache(tuple);
 		elog(LOG,"check role:%u with usage:%ld", rolentry->owneroid, rolentry->totalsize);
 		check_disk_quota_by_oid(rolentry->owneroid, rolentry->totalsize, DISKQUOTA_TYPE_ROLE);
+	}
+}
+
+static bool check_table_is_active(Oid reloid)
+{
+	bool found = false;
+	hash_search(pgstat_active_table_map, &reloid, HASH_REMOVE, &found);
+	if (found)
+	{
+		elog(LOG,"table is active with oid:%u", reloid);
+	}
+	return found;
+}
+
+static void build_active_table_map()
+{
+	DiskQuotaStatHashEntry *hash_entry;
+	HASH_SEQ_STATUS status;
+
+	hash_seq_init(&status, pgstat_table_map);
+
+	/* reset current pg_stat snapshot to get new data */
+	pgstat_clear_snapshot();
+
+	while ((hash_entry = (DiskQuotaStatHashEntry *) hash_seq_search(&status)) != NULL)
+	{
+
+		bool found_entry;
+		PgStat_StatTabEntry *stat_entry;
+
+		stat_entry = pgstat_fetch_stat_tabentry(hash_entry->t_id);
+		if (stat_entry == NULL) {
+			continue;
+		}
+
+		if (stat_entry->tuples_inserted != hash_entry->t_entry.tuples_inserted ||
+			stat_entry->tuples_updated != hash_entry->t_entry.tuples_updated ||
+			stat_entry->tuples_deleted != hash_entry->t_entry.tuples_deleted ||
+			stat_entry->autovac_vacuum_count !=  hash_entry->t_entry.autovac_vacuum_count ||
+			stat_entry->vacuum_count !=  hash_entry->t_entry.vacuum_count)
+		{
+			/* Update the entry */
+			hash_entry->t_entry.tuples_inserted = stat_entry->tuples_inserted;
+			hash_entry->t_entry.tuples_updated = stat_entry->tuples_updated;
+			hash_entry->t_entry.tuples_deleted = stat_entry->tuples_deleted;
+			hash_entry->t_entry.autovac_vacuum_count = stat_entry->autovac_vacuum_count;
+			hash_entry->t_entry.vacuum_count = stat_entry->vacuum_count;
+
+			/* Add this entry to active hash table if not exist */
+			hash_search(pgstat_active_table_map, &hash_entry->t_id, HASH_ENTER, &found_entry);
+
+		} 
 	}
 }
 
@@ -1510,7 +1644,10 @@ do_diskquota(void)
 		if (got_SIGTERM)
 			break;
 
+		elog(LOG,"refresh disk quota model begin");
+		build_active_table_map();
 		refresh_disk_quota_model();
+		elog(LOG,"refresh disk quota model end");
 	}
 }
 
