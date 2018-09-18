@@ -137,6 +137,38 @@ static volatile sig_atomic_t got_SIGTERM = false;
 /* Memory context for long-lived data */
 static MemoryContext diskquotaMemCxt;
 
+/*
+ * Hash table for O(1) t_id -> tsa_entry lookup
+ */
+static HTAB *pgStatTabHash = NULL;
+static HTAB *pgActiveabHash = NULL;
+
+typedef struct DiskQuotaLocalTableCache
+{
+	Oid			tableid;
+	PgStat_Counter tuples_inserted;
+	PgStat_Counter tuples_updated;
+	PgStat_Counter tuples_deleted;
+	PgStat_Counter vacuum_count;
+	PgStat_Counter autovac_vacuum_count;
+
+} DiskQuotaLocalTableCache;
+
+typedef struct DiskQuotaActiveHashEntry
+{
+	Oid			t_id;
+	PgStat_Counter t_refcount;
+} DiskQuotaActiveHashEntry;
+
+
+/*
+ * pgStatTabHash entry: map from relation OID to PgStat_TableStatus pointer
+ */
+typedef struct DiskQuotaStateHashEntry
+{
+	Oid			t_id;
+	DiskQuotaLocalTableCache t_entry;
+} DiskQuotaStatHashEntry;
 
 /*
  * Possible signals received by the launcher from remote processes.  These are
@@ -172,6 +204,8 @@ typedef struct DiskQuotaWorkItem
 } DiskQuotaWorkItem;
 
 #define NUM_WORKITEMS	256
+#define MAX_WORKING_TABLE 64
+#define REFRESH_QUOTA_TIME 2
 
 /*-------------
  * The main diskquota shmem struct.  On shared memory we store this main
@@ -1053,6 +1087,9 @@ do_diskquota(void)
 	Relation	classRel;
 	HeapTuple	tuple;
 	HeapScanDesc relScan;
+
+	HASH_SEQ_STATUS status;
+
 	
     elog(WARNING, "enter <%s>", __func__);
 	/*
@@ -1064,8 +1101,40 @@ do_diskquota(void)
 										  "disk quota worker",
 										  ALLOCSET_DEFAULT_SIZES);
 	MemoryContextSwitchTo(diskquotaMemCxt);
-	
 
+
+	/* Prepare the hash table */
+	if (pgStatTabHash == NULL)
+	{
+		HASHCTL ctl;
+
+		memset(&ctl, 0, sizeof(ctl));
+
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(DiskQuotaStatHashEntry);
+
+		pgStatTabHash = hash_create("disk quota Table State Entry lookup hash table",
+		                            NUM_WORKITEMS,
+		                            &ctl,
+		                            HASH_ELEM | HASH_BLOBS);
+	}
+
+	if (pgActiveabHash == NULL)
+	{
+		HASHCTL ctl;
+
+		memset(&ctl, 0, sizeof(ctl));
+
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(DiskQuotaActiveHashEntry);
+
+		pgActiveabHash = hash_create("disk quota Active Table Entry lookup hash table",
+		                             MAX_WORKING_TABLE,
+		                             &ctl,
+		                             HASH_ELEM | HASH_BLOBS);
+	}
+
+	/* TODO: This need to update from quota setting catalog dynamically */
 	/* Start a transaction so our commands have one to play into. */
 	StartTransactionCommand();
 
@@ -1083,12 +1152,28 @@ do_diskquota(void)
 	{
 		Form_pg_class classForm = (Form_pg_class) GETSTRUCT(tuple);
 		Oid			relid;
+		DiskQuotaStatHashEntry *entry;
+		bool found;
 
 		if (classForm->relkind != RELKIND_RELATION &&
 			classForm->relkind != RELKIND_MATVIEW)
 			continue;
 
 		relid = HeapTupleGetOid(tuple);
+
+		entry = hash_search(pgStatTabHash, &relid, HASH_ENTER, &found);
+
+		if (!found)
+		{
+			memset(&entry->t_entry, 0, sizeof(entry->t_entry));
+		}
+		else
+		{
+			elog(ERROR,"cloud not init table: db id=%u, relid = %u, table is existing in hash table",
+				MyDatabaseId, relid);
+		}
+
+
 		elog(LOG,"diskquota worker processing table: db id=%u, relid = %u", MyDatabaseId, relid);
 	}
 
@@ -1098,10 +1183,82 @@ do_diskquota(void)
 	
 	/* Finally close out the last transaction. */
 	CommitTransactionCommand();
+
+	/* Check the table status from  */
 	while(true) {
-		sleep(30);
+		DiskQuotaStatHashEntry *hash_entry;
+
+		hash_seq_init(&status, pgStatTabHash);
+
+		while ((hash_entry = (DiskQuotaStatHashEntry *) hash_seq_search(&status)) != NULL)
+		{
+
+			bool found_entry;
+			PgStat_StatTabEntry *stat_entry;
+
+
+			stat_entry = pgstat_fetch_stat_tabentry(hash_entry->t_id);
+			if (stat_entry == NULL) {
+				elog(LOG, "table relation %d is not found in pg_stat", hash_entry->t_id);
+				continue;
+			}
+
+			if (stat_entry->tuples_inserted != hash_entry->t_entry.tuples_inserted ||
+				stat_entry->tuples_updated != hash_entry->t_entry.tuples_updated ||
+				stat_entry->tuples_deleted != hash_entry->t_entry.tuples_deleted ||
+				stat_entry->autovac_vacuum_count !=  hash_entry->t_entry.autovac_vacuum_count ||
+				stat_entry->vacuum_count !=  hash_entry->t_entry.vacuum_count)
+			{
+				DiskQuotaActiveHashEntry *active_entry;
+
+				/* Update the entry */
+				hash_entry->t_entry.tuples_inserted = stat_entry->tuples_inserted;
+				hash_entry->t_entry.tuples_updated = stat_entry->tuples_updated;
+				hash_entry->t_entry.tuples_deleted = stat_entry->tuples_deleted;
+				hash_entry->t_entry.autovac_vacuum_count = stat_entry->autovac_vacuum_count;
+				hash_entry->t_entry.vacuum_count = stat_entry->vacuum_count;
+
+				/* Add this entry to active hash table if not exist */
+				active_entry = hash_search(pgActiveabHash, &hash_entry->t_id, HASH_ENTER, &found_entry);
+
+				if (!found_entry) {
+					active_entry->t_refcount = 1;
+				} else {
+					active_entry->t_refcount++;
+				}
+
+				elog(LOG, "add table relation %d is in to active queue, ref count is %ld",
+				     hash_entry->t_id, active_entry->t_refcount);
+
+			} else {
+				/* TODO: should do this in consumer */
+				hash_search(pgActiveabHash, &hash_entry->t_id, HASH_REMOVE, &found_entry);
+				elog(LOG, "delete table relation %d is in to active queue",
+				     hash_entry->t_id);
+			}
+		}
+
+		if (got_SIGTERM)
+		{
+			break;
+		}
+
+		sleep(REFRESH_QUOTA_TIME);
 		elog(LOG,"checking diskquota periodically");
+
 	}
+}
+
+static void
+pull_pg_stat(void)
+{
+
+}
+
+static void
+init_tbl_stat_hashtable(Oid databaseOid)
+{
+
 }
 
 /*
