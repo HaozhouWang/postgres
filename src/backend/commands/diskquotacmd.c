@@ -13,32 +13,26 @@
 
 #include "postgres.h"
 
-#include "commands/diskquotacmd.h"
-#include "catalog/pg_diskquota.h"
-#include "catalog/pg_diskquota_capability.h"
-
 #include "access/heapam.h"
-#include "utils/lsyscache.h"
+#include "access/htup_details.h"
+#include "catalog/dependency.h"
+#include "catalog/indexing.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_diskquota.h"
+#include "commands/diskquotacmd.h"
 #include "miscadmin.h"
 #include "utils/acl.h"
+#include "utils/builtins.h"
+#include "utils/guc.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
-#include "catalog/namespace.h"
-#include "catalog/indexing.h"
-#include "catalog/dependency.h"
-#include "catalog/pg_diskquota.h"
-#include "catalog/pg_diskquota_capability.h"
-#include "access/htup_details.h"
-#include "utils/builtins.h"
 
 void CreateDiskQuota(CreateDiskQuotaStmt *stmt)
 {
 	Relation	disk_quota_rel;
-	Relation	disk_quota_cap_rel;
 	Datum		quota_values[Natts_pg_diskquota];
 	bool		quota_nulls[Natts_pg_diskquota];
-	Datum		cap_values[Natts_pg_diskquota_capability];
-	bool		cap_nulls[Natts_pg_diskquota_capability];
 	Oid         db_object_oid = InvalidOid;
 	Oid         disk_quota_oid = InvalidOid;
 	HeapTuple	tuple;
@@ -48,7 +42,6 @@ void CreateDiskQuota(CreateDiskQuotaStmt *stmt)
 
 
 	disk_quota_rel = heap_open(DiskQuotaRelationId, RowExclusiveLock);
-	disk_quota_cap_rel = heap_open(DiskQuotaCapabilityRelationId, RowExclusiveLock);
 
 
 	/* Must be super user */
@@ -74,8 +67,6 @@ void CreateDiskQuota(CreateDiskQuotaStmt *stmt)
 	 */
 	memset(quota_values, 0, sizeof(quota_values));
 	memset(quota_nulls, false, sizeof(quota_nulls));
-	memset(cap_values, 0, sizeof(cap_values));
-	memset(cap_nulls, false, sizeof(cap_nulls));
 
 	quota_values[Anum_pg_diskquota_quotaname - 1] =
 		DirectFunctionCall1(namein, CStringGetDatum(stmt->quotaname));
@@ -142,24 +133,22 @@ void CreateDiskQuota(CreateDiskQuotaStmt *stmt)
 
 	quota_values[Anum_pg_diskquota_quotatargetoid - 1] = ObjectIdGetDatum(db_object_oid);
 
-	tuple = heap_form_tuple(disk_quota_rel->rd_att, quota_values, quota_nulls);
-
-	disk_quota_oid = CatalogTupleInsert(disk_quota_rel, tuple);
-
-	heap_freetuple(tuple);
-
-	recordDependencyOnOwner(DiskQuotaRelationId, disk_quota_oid, ownerId);
-
 	foreach(cell, stmt->options)
 	{
 		DefElem    *def = (DefElem *) lfirst(cell);
 
 		if (strcmp(def->defname, "quota") == 0 && quota_set == false)
 		{
-			cap_values[Anum_pg_diskquota_capability_quotaid - 1] = ObjectIdGetDatum(disk_quota_oid);
-			cap_values[Anum_pg_diskquota_capability_quotalimittype - 1] =
-				Int16GetDatum((int16) DISKQUOTA_LIMIT_TYPE_EXPECTED);
-			cap_values[Anum_pg_diskquota_capability_quotavalue - 1] = CStringGetTextDatum(strVal(def->arg));
+			int limitinMB;
+			const char *hintmsg;
+			if (!parse_int(strVal(def->arg), &limitinMB, GUC_UNIT_MB, &hintmsg))
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid value for integer option \"%s\": %s",
+								def->defname, strVal(def->arg))));	
+			}
+			quota_values[Anum_pg_diskquota_quotalimit- 1] = limitinMB;
 			quota_set = true;
 		}
 		else
@@ -179,33 +168,31 @@ void CreateDiskQuota(CreateDiskQuotaStmt *stmt)
 		}
 	}
 
+
+	tuple = heap_form_tuple(disk_quota_rel->rd_att, quota_values, quota_nulls);
+
+	disk_quota_oid = CatalogTupleInsert(disk_quota_rel, tuple);
+
+	heap_freetuple(tuple);
+
+	recordDependencyOnOwner(DiskQuotaRelationId, disk_quota_oid, ownerId);
+
 	if (!quota_set) {
 		ereport(ERROR,
 			(errmsg("quota is not set in option"),
 			 errhint("Add quota='size' in option")));
 	}
 
-	tuple = heap_form_tuple(disk_quota_cap_rel->rd_att, cap_values, cap_nulls);
-
-	CatalogTupleInsert(disk_quota_cap_rel, tuple);
-
-	heap_freetuple(tuple);
-
 	heap_close(disk_quota_rel, RowExclusiveLock);
-	heap_close(disk_quota_cap_rel, RowExclusiveLock);
 }
 
 void DropDiskQuota(DropDiskQuotaStmt *stmt)
 {
 	Relation	disk_quota_rel;
-	Relation	disk_quota_cap_rel;
-	Oid         disk_quota_oid;
 	HeapTuple	disk_quota_tuple;
-	HeapTuple	disk_quota_cap_tuple;
 
 
 	disk_quota_rel = heap_open(DiskQuotaRelationId, RowExclusiveLock);
-	disk_quota_cap_rel = heap_open(DiskQuotaCapabilityRelationId, RowExclusiveLock);
 
 	disk_quota_tuple = SearchSysCache1(DISKQUOTANAME, CStringGetDatum(stmt->quotaname));
 
@@ -219,23 +206,10 @@ void DropDiskQuota(DropDiskQuotaStmt *stmt)
 		}
 	}
 
-	disk_quota_oid = HeapTupleGetOid(disk_quota_tuple);
-
-	disk_quota_cap_tuple = SearchSysCache1(DISKQUOTACAPQUOTAID, ObjectIdGetDatum(disk_quota_oid));
-
-	if (!HeapTupleIsValid(disk_quota_cap_tuple)) {
-		ereport(ERROR,
-			(errmsg("cache lookup failed for disk quota %s", stmt->quotaname)));
-	}
-
-	CatalogTupleDelete(disk_quota_cap_rel, &disk_quota_cap_tuple->t_self);
-
 	CatalogTupleDelete(disk_quota_rel, &disk_quota_tuple->t_self);
 
 	ReleaseSysCache(disk_quota_tuple);
-	ReleaseSysCache(disk_quota_cap_tuple);
 
-	heap_close(disk_quota_cap_rel, RowExclusiveLock);
 	heap_close(disk_quota_rel, RowExclusiveLock);
 }
 

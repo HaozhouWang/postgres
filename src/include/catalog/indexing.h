@@ -360,13 +360,12 @@ DECLARE_UNIQUE_INDEX(pg_subscription_subname_index, 6115, on pg_subscription usi
 DECLARE_UNIQUE_INDEX(pg_subscription_rel_srrelid_srsubid_index, 6117, on pg_subscription_rel using btree(srrelid oid_ops, srsubid oid_ops));
 #define SubscriptionRelSrrelidSrsubidIndexId 6117
 
-DECLARE_UNIQUE_INDEX(pg_diskquota_oid_index, 6127, on pg_diskquota using btree(oid oid_ops));
-#define DiskQuotaOidIndexId 6127
-DECLARE_UNIQUE_INDEX(pg_diskquota_name_index, 6124, on pg_diskquota using btree(quotaname name_ops));
-#define DiskQuotaNameIndexId 6124
+DECLARE_UNIQUE_INDEX(pg_diskquota_oid_index, 6124, on pg_diskquota using btree(oid oid_ops));
+#define DiskQuotaOidIndexId 6124
+DECLARE_UNIQUE_INDEX(pg_diskquota_name_index, 6125, on pg_diskquota using btree(quotaname name_ops));
+#define DiskQuotaNameIndexId 6125
 
-DECLARE_UNIQUE_INDEX(pg_diskquota_capability_oid_index, 6126, on pg_diskquota_capability using btree(oid oid_ops));
-#define QuotaCapabilityOidIndexId 6126
-DECLARE_UNIQUE_INDEX(pg_diskquota_capability_quotaid_index, 6125, on pg_diskquota_capability using btree(quotaid oid_ops));
-#define QuotaCapabilityQuotaIdIndexId 6125
+DECLARE_UNIQUE_INDEX(pg_diskquota_target_oid_index, 6126, on pg_diskquota using btree(quotatargetoid oid_ops));
+#define DiskQuotaTargetOidIndexId 6126
+
 #endif							/* INDEXING_H */

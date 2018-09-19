@@ -25,6 +25,7 @@
 #include "storage/fd.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/dbsize.h"
 #include "utils/numeric.h"
 #include "utils/rel.h"
 #include "utils/relfilenodemap.h"
@@ -1019,4 +1020,20 @@ pg_relation_filepath(PG_FUNCTION_ARGS)
 	path = relpathbackend(rnode, backend, MAIN_FORKNUM);
 
 	PG_RETURN_TEXT_P(cstring_to_text(path));
+}
+
+int64 calculate_total_relation_size_by_oid(Oid relOid)
+{
+	Relation	rel;
+	int64		size;
+
+	rel = try_relation_open(relOid, AccessShareLock);
+
+	if (rel == NULL)
+		return 0;
+
+	size = calculate_total_relation_size(rel);
+
+	relation_close(rel, AccessShareLock);
+	return size;
 }

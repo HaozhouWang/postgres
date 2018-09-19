@@ -45,7 +45,9 @@ CATALOG(pg_diskquota,6122,DiskQuotaRelationId)
 {
 	NameData	quotaname;		/* diskquota name */       
 	int16		quotatype;		/* diskquota type name */
-	Oid		quotatargetoid;		/* diskquota target db object oid*/
+	Oid			quotatargetoid;	/* diskquota target db object oid*/
+	int32		quotalimit;		/* diskquota size limit in MB*/
+	int32		quotaredzone;	/* diskquota redzone in MB*/
 } FormData_pg_diskquota;
 
 /* ----------------
@@ -54,22 +56,5 @@ CATALOG(pg_diskquota,6122,DiskQuotaRelationId)
  * ----------------
  */
 typedef FormData_pg_diskquota *Form_pg_diskquota;
-
-
-/* ----------------
- *      pg_diskquotacapability definition.  cpp turns this into
- *      typedef struct FormData_pg_diskquotacapability
- * ----------------
- */
-
-typedef enum DiskQuotaLimitType
-{
-	DISKQUOTA_LIMIT_TYPE_UNKNOWN = -1,
-
-	DISKQUOTA_LIMIT_TYPE_EXPECTED,		/* expected quota limit on a db object*/
-
-	DISKQUOTA_LIMIT_TYPE_REDZONE,		/* redzone limit, warning when disk usage of a db object is high*/
-
-} DiskQuotaLimitType;
 
 #endif							/* PG_DISKQUOTA_H */

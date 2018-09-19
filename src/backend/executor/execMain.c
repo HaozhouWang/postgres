@@ -51,6 +51,7 @@
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
 #include "parser/parsetree.h"
+#include "postmaster/diskquota.h"
 #include "rewrite/rewriteManip.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
@@ -583,6 +584,12 @@ ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation)
 				aclcheck_error(ACLCHECK_NO_PRIV, get_relkind_objtype(get_rel_relkind(rte->relid)),
 							   get_rel_name(rte->relid));
 			return false;
+		}
+
+		if (!CheckTableQuota(rte->relid))
+		{
+			ereport(ERROR,(errcode(ERRCODE_DISK_FULL),
+					errmsg("user's disk space quota exceeded")));
 		}
 	}
 

@@ -67,4 +67,5 @@ extern void DiskquotaLauncherIAm(void);
 extern Size DiskQuotaShmemSize(void);
 extern void DiskQuotaShmemInit(void);
 
+extern bool CheckTableQuota(Oid reloid);
 #endif							/* DISKQUOTA_H */
