@@ -3314,7 +3314,7 @@ static struct config_string ConfigureNamesString[] =
 			gettext_noop("Database list for disk quota monitoring."),
 			NULL,
 		},
-		&_guc_dq_database_list,
+		&guc_dq_database_list,
 		"postgres,test0,test1",
 		NULL, NULL, NULL
 	},
