@@ -115,16 +115,9 @@
 /*
  * GUC parameters
  */
-char *_guc_dq_database_list = NULL;
+char *guc_dq_database_list = NULL;
 bool		diskquota_start_daemon = true;
 int			diskquota_max_workers;
-
-/* how long to keep pgstat data in the launcher, in milliseconds */
-#define STATS_READ_DELAY 1000
-
-/* the minimum allowed time between two awakenings of the launcher */
-#define MIN_DISKQUOTA_SLEEPTIME 100.0 /* milliseconds */
-#define MAX_DISKQUOTA_SLEEPTIME 300	/* seconds */
 
 /* cluster level max size of black list */
 #define MAX_DISK_QUOTA_BLACK_ENTRIES 8192 * 1024
@@ -149,8 +142,8 @@ static MemoryContext diskquotaMemCxt;
 typedef struct TableSizeEntry TableSizeEntry;
 typedef struct NamespaceSizeEntry NamespaceSizeEntry;
 typedef struct RoleSizeEntry RoleSizeEntry;
-typedef struct BlackTableEntry BlackTableEntry;
-typedef struct LocalBlackTableEntry LocalBlackTableEntry;
+typedef struct BlackMapEntry BlackMapEntry;
+typedef struct LocalBlackMapEntry LocalBlackMapEntry;
 
 struct TableSizeEntry
 {
@@ -172,13 +165,13 @@ struct RoleSizeEntry
 	int64		totalsize;
 };
 
-struct BlackTableEntry
+struct BlackMapEntry
 {
 	Oid 		targetoid;
 	Oid			databaseoid;
 };
 
-struct LocalBlackTableEntry
+struct LocalBlackMapEntry
 {
 	Oid 		targetoid;
 	bool		isexceeded;
@@ -296,7 +289,7 @@ static void update_role_map(Oid owneroid, int64 updatesize);
 static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
 /********************************************************************
- *					  AUTOVACUUM LAUNCHER CODE
+ *					  DISKQUOTA LAUNCHER CODE
  ********************************************************************/
 
 #ifdef EXEC_BACKEND
@@ -477,7 +470,7 @@ DiskQuotaLauncherMain(int argc, char *argv[])
 	/* Identify myself via ps */
 	init_ps_display(pgstat_get_backend_desc(B_DISKQUOTA_LAUNCHER), "", "", "");
 	elog(WARNING, "worker hubert4");
-    elog(WARNING, "_guc_dq_databases='%s'\n", _guc_dq_database_list);
+    elog(WARNING, "guc_dq_databases='%s'\n", guc_dq_database_list);
 	ereport(DEBUG1,
 			(errmsg("diskquota launcher started")));
 
@@ -658,17 +651,20 @@ shutdown:
 
 	proc_exit(0);				/* done */
 }
-// max number of workers
+
+/* get max number of workers */
 static int
 get_num_workers()
 {
     return diskquota_max_workers;
 }
+
 static void
 _do_start_worker(DiskQuotaWorkItem *item)
 {
     SendPostmasterSignal(PMSIGNAL_START_DISKQUOTA_WORKER);
 }
+
 static void
 _do_start_all_workers()
 {
@@ -766,7 +762,7 @@ dql_sigterm_handler(SIGNAL_ARGS)
 
 
 /********************************************************************
- *					  AUTOVACUUM WORKER CODE
+ *					  DISKQUOTA WORKER CODE
  ********************************************************************/
 
 #ifdef EXEC_BACKEND
@@ -1087,9 +1083,9 @@ static List *
 get_database_list(void)
 {
 	List	   *dblist = NULL;
-    if (!SplitIdentifierString(_guc_dq_database_list, ',', &dblist))
+    if (!SplitIdentifierString(guc_dq_database_list, ',', &dblist))
     {
-        elog(FATAL, "cann't get database list from guc:'%s'", _guc_dq_database_list);
+        elog(FATAL, "cann't get database list from guc:'%s'", guc_dq_database_list);
         return NULL;
     }
 	return dblist;
@@ -1138,7 +1134,7 @@ init_disk_quota_model(void)
 	/* */
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
-	hash_ctl.entrysize = sizeof(LocalBlackTableEntry);
+	hash_ctl.entrysize = sizeof(LocalBlackMapEntry);
 	local_disk_quota_black_map = hash_create("local blackmap whose quota limitation is reached",
 									MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
 									&hash_ctl,
@@ -1151,8 +1147,8 @@ static void
 flush_local_black_map()
 {
 	HASH_SEQ_STATUS iter;
-	LocalBlackTableEntry* localblackentry;
-	BlackTableEntry* blackentry;
+	LocalBlackMapEntry* localblackentry;
+	BlackMapEntry* blackentry;
 	bool found;
 
 	LWLockAcquire(DiskQuotaLock, LW_EXCLUSIVE);
@@ -1162,7 +1158,7 @@ flush_local_black_map()
 	{
 		if (localblackentry->isexceeded) 
 		{
-			blackentry = (BlackTableEntry*) hash_search(disk_quota_black_map,
+			blackentry = (BlackMapEntry*) hash_search(disk_quota_black_map,
 							   (void *) &localblackentry->targetoid,
 							   HASH_ENTER_NULL, &found);
 			if (blackentry == NULL)
@@ -1195,8 +1191,8 @@ static void
 reset_local_black_map()
 {
 	HASH_SEQ_STATUS iter;
-	LocalBlackTableEntry* localblackentry;
-	BlackTableEntry* blackentry;
+	LocalBlackMapEntry* localblackentry;
+	BlackMapEntry* blackentry;
 	bool found;
 	/* clear entries in local black map*/
 	hash_seq_init(&iter, local_disk_quota_black_map);
@@ -1216,7 +1212,7 @@ reset_local_black_map()
 		/* only reset entries for current db */
 		if (blackentry->databaseoid == MyDatabaseId)
 		{
-			localblackentry = (LocalBlackTableEntry*) hash_search(local_disk_quota_black_map,
+			localblackentry = (LocalBlackMapEntry*) hash_search(local_disk_quota_black_map,
 							   (void *) &blackentry->targetoid,
 							   HASH_ENTER, &found);
 			if (!found)
@@ -1241,7 +1237,7 @@ static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, int8 dis
 	HeapTuple				tuple;
 	int32 					quota_limit_mb;
 	int32 					current_usage_mb;
-	LocalBlackTableEntry*	localblackentry;
+	LocalBlackMapEntry*	localblackentry;
 
 	tuple = SearchSysCache1(DISKQUOTATARGETOID, ObjectIdGetDatum(targetOid));
 	if (!HeapTupleIsValid(tuple))
@@ -1257,7 +1253,7 @@ static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, int8 dis
 	{
 		elog(DEBUG1,"Put object %u to blacklist with quota limit:%d, current usage:%d", 
 				targetOid, quota_limit_mb, current_usage_mb);
-		localblackentry = (LocalBlackTableEntry*) hash_search(local_disk_quota_black_map, 
+		localblackentry = (LocalBlackMapEntry*) hash_search(local_disk_quota_black_map,
 					&targetOid,
 					HASH_ENTER, &found);
 		localblackentry->isexceeded = true;
@@ -1575,7 +1571,7 @@ DiskQuotaShmemSize(void)
 
 	size = sizeof(DiskQuotaShmemStruct);
 	size = MAXALIGN(size);
-	size = add_size(size, hash_estimate_size(MAX_DISK_QUOTA_BLACK_ENTRIES, sizeof(BlackTableEntry)));
+	size = add_size(size, hash_estimate_size(MAX_DISK_QUOTA_BLACK_ENTRIES, sizeof(BlackMapEntry)));
 	return size;
 }
 
@@ -1596,7 +1592,7 @@ DiskQuotaShmemInit(void)
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
-	hash_ctl.entrysize = sizeof(BlackTableEntry);
+	hash_ctl.entrysize = sizeof(BlackMapEntry);
 	hash_ctl.alloc = ShmemAllocNoError;
 	hash_ctl.dsize = hash_ctl.max_dsize = hash_select_dirsize(MAX_DISK_QUOTA_BLACK_ENTRIES);
 	disk_quota_black_map = ShmemInitHash("blackmap whose quota limitation is reached",
