@@ -46,7 +46,6 @@
 #include "catalog/pg_diskquota.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/dbcommands.h"
-#include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "lib/ilist.h"
 #include "libpq/pqsignal.h"
@@ -205,7 +204,7 @@ typedef enum
     WIS_STOPPING,
 }WIState;
 /*
- * vacuum workitem array, stored in DiskQuotaShmem->dq_workItems.  This
+ * disk quota workitem array, stored in DiskQuotaShmem->dq_workItems.  This
  * list is mostly protected by DiskQuotaLock, except that if an item is
  * marked 'active' other processes must not modify the work-identifying
  * members.
@@ -321,7 +320,7 @@ dqlauncher_forkexec(void)
  * We need this set from the outside, before InitProcess is called
  */
 void
-vacuumLauncherIAm(void)
+DiskquotaLauncherIAm(void)
 {
 	am_diskquota_launcher = true;
 }
@@ -659,7 +658,7 @@ do_start_all_workers()
 	MemoryContext tmpcxt,
 				oldcxt;
     int idx = 0;
-    int rc, N;
+    int N;
     DiskQuotaWorkItem *item;
     DiskQuotaWorkItem *itemArray;
 
@@ -681,7 +680,7 @@ do_start_all_workers()
                 elog(WARNING, "running failed, state=%d", (int)item->dqw_state);
             }
             LWLockRelease(DiskQuotaLock);
-            rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+            WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
                     2000, WAIT_EVENT_DISKQUOTA_MAIN);
             continue;
         }
@@ -697,7 +696,7 @@ do_start_all_workers()
 
         do_start_worker(item);
 
-        rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+        WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
             2000, WAIT_EVENT_DISKQUOTA_MAIN);
         ResetLatch(MyLatch);
         
@@ -776,7 +775,7 @@ dqworker_forkexec(void)
  * We need this set from the outside, before InitProcess is called
  */
 void
-vacuumWorkerIAm(void)
+DiskquotaWorkerIAm(void)
 {
 	am_diskquota_worker = true;
 }
@@ -846,7 +845,7 @@ DiskQuotaWorkerMain(int argc, char *argv[])
 	pqsignal(SIGHUP, dq_sighup_handler);
 
 	/*
-	 * SIGINT is used to signal canceling the current table's vacuum; SIGTERM
+	 * SIGINT is used to signal canceling the current disk quota check; SIGTERM
 	 * means abort and exit cleanly, and SIGQUIT means abandon ship.
 	 */
 	pqsignal(SIGINT, StatementCancelHandler);
