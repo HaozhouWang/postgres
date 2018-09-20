@@ -2886,7 +2886,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&diskquota_max_workers,
-		3, 1, MAX_BACKENDS,
+		3, 1, 10,
 		check_diskquota_max_workers, NULL, NULL
 	},
 

@@ -2,15 +2,14 @@
  *
  * diskquota.c
  *
- * PostgreSQL Integrated vacuum Daemon
+ * PostgreSQL Integrated disk quota Daemon
  *
  * The diskquota system is structured in two different kinds of processes: the
  * diskquota launcher and the diskquota worker.  The launcher is an
  * always-running process, started by the postmaster when the diskquota GUC
- * parameter is set.  The launcher schedules diskquota workers to be started
- * when appropriate.  The workers are the processes which execute the actual
- * vacuuming; they connect to a database as determined in the launcher, and
- * once connected they examine the catalogs to select the tables to vacuum.
+ * parameter is set.  The launcher starts diskquota workers based on a given 
+ * list of databases that disk quota is enabled.  The workers are the processes 
+ * which calculate the disk usage of each monitored objects in the database.
  *
  * The diskquota launcher cannot start the worker processes by itself,
  * because doing so would cause robustness issues (namely, failure to shut
@@ -18,37 +17,6 @@
  * connected to shared memory and is thus subject to corruption there, it is
  * not as robust as the postmaster).  So it leaves that task to the postmaster.
  *
- * There is an diskquota shared memory area, where the launcher stores
- * information about the database it wants vacuumed.  When it wants a new
- * worker to start, it sets a flag in shared memory and sends a signal to the
- * postmaster.  Then postmaster knows nothing more than it must start a worker;
- * so it forks a new child, which turns into a worker.  This new process
- * connects to shared memory, and there it can inspect the information that the
- * launcher has set up.
- *
- * If the fork() call fails in the postmaster, it sets a flag in the shared
- * memory area, and sends a signal to the launcher.  The launcher, upon
- * noticing the flag, can try starting the worker again by resending the
- * signal.  Note that the failure can only be transient (fork failure due to
- * high load, memory pressure, too many processes, etc); more permanent
- * problems, like failure to connect to a database, are detected later in the
- * worker and dealt with just by having the worker exit normally.  The launcher
- * will launch a new worker again later, per schedule.
- *
- * When the worker is done vacuuming it sends SIGUSR2 to the launcher.  The
- * launcher then wakes up and is able to launch another worker, if the schedule
- * is so tight that a new worker is needed immediately.  At this time the
- * launcher can also balance the settings for the various remaining workers'
- * cost-based vacuum delay feature.
- *
- * Note that there can be more than one worker in a database concurrently.
- * They will store the table they are currently vacuuming in shared memory, so
- * that other workers avoid being blocked waiting for the vacuum lock for that
- * table.  They will also reload the pgstats data just before vacuuming each
- * table, to avoid vacuuming a table that was just finished being vacuumed by
- * another worker and thus is no longer noted in shared memory.  However,
- * there is a window (caused by pgstat delay) on which a worker may choose a
- * table that was already vacuumed; this is a bug in the current design.
  *
  * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -116,8 +84,8 @@
 /*
  * GUC parameters
  */
-char *guc_dq_database_list = NULL;
-bool		diskquota_start_daemon = true;
+char*		guc_dq_database_list = NULL;
+bool		diskquota_start_daemon = false;
 int			diskquota_max_workers;
 
 /* cluster level max size of black list */
@@ -250,7 +218,7 @@ typedef struct DiskQuotaWorkItem
     TimestampTz dqw_launchtime;
 } DiskQuotaWorkItem;
 
-#define NUM_WORKITEMS	256
+#define NUM_WORKITEMS			10
 #define INIT_WORKING_TABLE_SIZE 64
 
 /*-------------
@@ -305,8 +273,8 @@ static void dql_sigterm_handler(SIGNAL_ARGS);
 static void init_worker_parameters(void);
 static void launcher_init_disk_quota();
 static void launcher_monitor_disk_quota();
-static void _do_start_all_workers(void);
-static void _do_start_worker(DiskQuotaWorkItem *item);
+static void do_start_all_workers(void);
+static void do_start_worker(DiskQuotaWorkItem *item);
 
 static void init_disk_quota_model(void);
 static void refresh_disk_quota_model(void);
@@ -323,7 +291,6 @@ static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
 static bool check_table_is_active(Oid reloid);
 static void build_active_table_map();
-static bool check_table_quota(Oid reloid, bool ereport_on_violation);
 /********************************************************************
  *					  DISKQUOTA LAUNCHER CODE
  ********************************************************************/
@@ -483,14 +450,7 @@ db_name_to_oid(const char *db_name)
 static void 
 launcher_init_disk_quota()
 {
-    elog(DEBUG1, "start func<%s>", __func__);
-    if (diskquota_max_workers > NUM_WORKITEMS)
-    {
-        elog(DEBUG1, "guc diskquota_max_workers > fixed size of work items: %d - %d",
-            diskquota_max_workers, NUM_WORKITEMS);
-        diskquota_max_workers = NUM_WORKITEMS;
-    }
-    _do_start_all_workers();
+    do_start_all_workers();
 }
 
 /*
@@ -688,13 +648,13 @@ get_num_workers()
 }
 
 static void
-_do_start_worker(DiskQuotaWorkItem *item)
+do_start_worker(DiskQuotaWorkItem *item)
 {
     SendPostmasterSignal(PMSIGNAL_START_DISKQUOTA_WORKER);
 }
 
 static void
-_do_start_all_workers()
+do_start_all_workers()
 {
 	MemoryContext tmpcxt,
 				oldcxt;
@@ -703,7 +663,6 @@ _do_start_all_workers()
     DiskQuotaWorkItem *item;
     DiskQuotaWorkItem *itemArray;
 
-    elog(DEBUG1, "%s ...", __func__);
 	tmpcxt = AllocSetContextCreate(CurrentMemoryContext,
 								   "Start worker tmp cxt",
 								   ALLOCSET_DEFAULT_SIZES);
@@ -736,12 +695,10 @@ _do_start_all_workers()
         item->dqw_launchtime = GetCurrentTimestamp();
         LWLockRelease(DiskQuotaLock);
 
-        _do_start_worker(item);
+        do_start_worker(item);
 
-        elog(WARNING, "start to wait ... <%s>", __func__);
         rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
             2000, WAIT_EVENT_DISKQUOTA_MAIN);
-        elog(WARNING, "wait latch returned <%s> rc=%d", __func__, rc);
         ResetLatch(MyLatch);
         
         idx++;
@@ -1055,7 +1012,6 @@ DiskQuotaWorkerMain(int argc, char *argv[])
 static void
 FreeWorkerInfo(int code, Datum arg)
 {
-    elog(WARNING, "worker exit <%s> pid=%d", __func__, (int)getpid());
 	if (myWorkItem != NULL)
 	{
 		LWLockAcquire(DiskQuotaLock, LW_EXCLUSIVE);
@@ -1740,7 +1696,6 @@ init_worker_parameters()
 
     dblist = get_database_list();
     worker = DiskQuotaShmem->dq_workItems;
-    elog(WARNING, "%s, max=%d", __func__, diskquota_max_workers);
 
     foreach(cell, dblist)
     {
