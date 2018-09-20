@@ -93,6 +93,10 @@ int			diskquota_max_workers;
 #define INIT_DISK_QUOTA_BLACK_ENTRIES 8192
 /* per database level max size of black list */
 #define MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES 8192
+/* max number of disk quota worker process */
+#define NUM_WORKITEMS			10
+/* initial active table size */
+#define INIT_ACTIVE_TABLE_SIZE 64
 
 /* Flags to tell if we are in an diskquota process */
 static bool am_diskquota_launcher = false;
@@ -112,6 +116,7 @@ typedef struct RoleSizeEntry RoleSizeEntry;
 typedef struct BlackMapEntry BlackMapEntry;
 typedef struct LocalBlackMapEntry LocalBlackMapEntry;
 
+/* local cache of table disk size and corresponding schema and owner */
 struct TableSizeEntry
 {
 	Oid			reloid;
@@ -120,24 +125,28 @@ struct TableSizeEntry
 	int64		totalsize;
 };
 
+/* local cache of namespace disk size */
 struct NamespaceSizeEntry
 {
 	Oid			namespaceoid;
 	int64		totalsize;
 };
 
+/* local cache of role disk size */
 struct RoleSizeEntry
 {
 	Oid			owneroid;
 	int64		totalsize;
 };
 
+/* global blacklist for which exceed their quota limit */
 struct BlackMapEntry
 {
 	Oid 		targetoid;
 	Oid			databaseoid;
 };
 
+/* local blacklist for which exceed their quota limit */
 struct LocalBlackMapEntry
 {
 	Oid 		targetoid;
@@ -145,11 +154,13 @@ struct LocalBlackMapEntry
 };
 
 /*
- * Hash table for O(1) t_id -> tsa_entry lookup
+ * Get active table list by fetch pgstat information
+ * Hash table for O(1) reloid -> tsa_entry lookup
  */
 static HTAB *pgstat_table_map = NULL;
 static HTAB *pgstat_active_table_map = NULL;
 
+/* Cache to detect the active table list */
 typedef struct DiskQuotaLocalTableCache
 {
 	Oid			tableid;
@@ -161,9 +172,10 @@ typedef struct DiskQuotaLocalTableCache
 
 } DiskQuotaLocalTableCache;
 
+/* struct to describe the active table */
 typedef struct DiskQuotaActiveHashEntry
 {
-	Oid			t_id;
+	Oid			reloid;
 	PgStat_Counter t_refcount;
 } DiskQuotaActiveHashEntry;
 
@@ -173,7 +185,7 @@ typedef struct DiskQuotaActiveHashEntry
  */
 typedef struct DiskQuotaStateHashEntry
 {
-	Oid			t_id;
+	Oid			reloid;
 	DiskQuotaLocalTableCache t_entry;
 } DiskQuotaStatHashEntry;
 
@@ -182,20 +194,11 @@ static HTAB *table_size_map = NULL;
 static HTAB *namespace_size_map = NULL;
 static HTAB *role_size_map = NULL;
 
+/* black list for database objects which exceed their quota limit */
 static HTAB *disk_quota_black_map = NULL;
 static HTAB *local_disk_quota_black_map = NULL;
-/*
- * Possible signals received by the launcher from remote processes.  These are
- * stored atomically in shared memory so that other processes can set them
- * without locking.
- */
-typedef enum
-{
-	DiskQuotaForkFailed,			/* failed trying to start a worker */
-	DiskQuotaRebalance,			/* rebalance the cost limits */
-	DiskQuotaNumSignals			/* must be last */
-} DiskQuotaSignal;
 
+/* workitem state*/
 typedef enum 
 {
     WIS_INVALID = 0,
@@ -217,16 +220,11 @@ typedef struct DiskQuotaWorkItem
     TimestampTz dqw_launchtime;
 } DiskQuotaWorkItem;
 
-#define NUM_WORKITEMS			10
-#define INIT_WORKING_TABLE_SIZE 64
-
 /*-------------
  * The main diskquota shmem struct.  On shared memory we store this main
  * struct and the array of WorkerInfo structs.  This struct keeps:
  *
  * dq_launcherpid	the PID of the diskquota launcher
- * dq_freeWorkers	the WorkerInfo freelist
- * dq_runningWorkers the WorkerInfo non-free queue
  * dq_startingWorker pointer to WorkerInfo currently being started (cleared by
  *					the worker itself as soon as it's up and running)
  * dq_workItems		work item array
@@ -244,11 +242,6 @@ typedef struct
 
 static DiskQuotaShmemStruct *DiskQuotaShmem;
 static DiskQuotaWorkItem *myWorkItem;
-
-/*
- * the database list (of dql_dbase elements) in the launcher, and the context
- * that contains it
- */
 
 /* PID of launcher, valid only in worker while shutting down */
 int			DiskquotaLauncherPid = 0;
@@ -272,7 +265,6 @@ static void dql_sigterm_handler(SIGNAL_ARGS);
 static void init_worker_parameters(void);
 static void launcher_init_disk_quota();
 static void launcher_monitor_disk_quota();
-static void do_start_all_workers(void);
 static void do_start_worker(DiskQuotaWorkItem *item);
 
 static void init_disk_quota_model(void);
@@ -364,12 +356,13 @@ StartDiskQuotaLauncher(void)
 }
 
 /*
- * After init stage, launcher is responsible for monitor the disk usage of db objects in active database
- * Laucher will assign a freeworker slot to a active database based on a score.
+ * After init stage, launcher is responsible for monitor the worker process and
+ * active databases.
  */
 static void
 launcher_monitor_disk_quota()
 {
+	/*TODO: monitor the state of worker process and active database */
 	while(!got_SIGTERM)
 	{
 		int rc;
@@ -428,6 +421,8 @@ GetDatabaseTuple(const char *dbname)
 
     return tuple;
 }
+
+/* find oid given a database name */
 static Oid
 db_name_to_oid(const char *db_name)
 {
@@ -441,15 +436,6 @@ db_name_to_oid(const char *db_name)
     }
     CommitTransactionCommand();
     return oid;
-}
-
-/*
- *
- */
-static void 
-launcher_init_disk_quota()
-{
-    do_start_all_workers();
 }
 
 /*
@@ -639,13 +625,7 @@ shutdown:
 	proc_exit(0);				/* done */
 }
 
-/* get max number of workers */
-static int
-get_num_workers()
-{
-    return diskquota_max_workers;
-}
-
+/* let postmaster to fork disk quota worker process */
 static void
 do_start_worker(DiskQuotaWorkItem *item)
 {
@@ -653,7 +633,7 @@ do_start_worker(DiskQuotaWorkItem *item)
 }
 
 static void
-do_start_all_workers()
+launcher_init_disk_quota()
 {
 	MemoryContext tmpcxt,
 				oldcxt;
@@ -669,8 +649,7 @@ do_start_all_workers()
 
     init_worker_parameters();
     itemArray = DiskQuotaShmem->dq_workItems;
-    N = get_num_workers();
-    while(idx<N) {
+    while (idx < diskquota_max_workers) {
 		LWLockAcquire(DiskQuotaLock, LW_EXCLUSIVE);
         item = DiskQuotaShmem->dq_startingWorker;
         if (item != NULL)
@@ -1059,7 +1038,9 @@ get_database_list(void)
 	return dblist;
 }
 
-
+/*
+ * init disk quota model when the worker process firstly started.
+ */
 void
 init_disk_quota_model(void)
 {
@@ -1069,6 +1050,7 @@ init_disk_quota_model(void)
 										   "Disk quotas model context",
 										   ALLOCSET_DEFAULT_SIZES);
 
+	/* init hash table for table/schema/role etc.*/
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(TableSizeEntry);
@@ -1098,7 +1080,7 @@ init_disk_quota_model(void)
 								1024,
 								&hash_ctl,
 								HASH_ELEM | HASH_CONTEXT| HASH_BLOBS);
-	/* */
+	
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(LocalBlackMapEntry);
@@ -1106,7 +1088,6 @@ init_disk_quota_model(void)
 									MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
 									&hash_ctl,
 									HASH_ELEM | HASH_CONTEXT | HASH_BLOBS);
-	/* Prepare the hash table */
 	if (pgstat_table_map == NULL)
 	{
 		HASHCTL ctl;
@@ -1132,14 +1113,19 @@ init_disk_quota_model(void)
 		ctl.entrysize = sizeof(DiskQuotaActiveHashEntry);
 
 		pgstat_active_table_map = hash_create("disk quota Active Table Entry lookup hash table",
-		                             INIT_WORKING_TABLE_SIZE,
+		                             INIT_ACTIVE_TABLE_SIZE,
 		                             &ctl,
 		                             HASH_ELEM | HASH_BLOBS);
 	}
 
+	/* calcualte the disk usage for each database objects */
 	refresh_disk_quota_model();
 }
 
+/*
+ * generate the new shared blacklist from the localblack list which
+ * exceed the quota limit.
+ * */
 static void
 flush_local_black_map()
 {
@@ -1184,6 +1170,7 @@ flush_local_black_map()
 
 }
 
+/* fetch the new blacklist from shared blacklist at each refresh iteration. */
 static void 
 reset_local_black_map()
 {
@@ -1223,6 +1210,10 @@ reset_local_black_map()
 
 }
 
+/*
+ * Compare the disk quota limit and current usage of a database object. 
+ * Put them into local blacklist if quota limit is exceeded.
+ */
 static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, int8 diskquota_type)
 {
 	bool					found;
@@ -1259,6 +1250,7 @@ remove_namespace_map(Oid namespaceoid)
 			&namespaceoid,
 			HASH_REMOVE, NULL);
 }
+
 static void 
 update_namespace_map(Oid namespaceoid, int64 updatesize)
 {
@@ -1278,7 +1270,6 @@ update_namespace_map(Oid namespaceoid, int64 updatesize)
 
 }
 
-
 static void 
 remove_role_map(Oid owneroid)
 {
@@ -1286,6 +1277,7 @@ remove_role_map(Oid owneroid)
 			&owneroid,
 			HASH_REMOVE, NULL);
 }
+
 static void 
 update_role_map(Oid owneroid, int64 updatesize)
 {
@@ -1448,7 +1440,7 @@ static void calculate_schema_disk_usage()
 			continue;
 		}
 		ReleaseSysCache(tuple);	
-		elog(LOG,"check namespace:%u with usage:%ld", nsentry->namespaceoid, nsentry->totalsize);
+		elog(DEBUG1, "check namespace:%u with usage:%ld", nsentry->namespaceoid, nsentry->totalsize);
 		check_disk_quota_by_oid(nsentry->namespaceoid, nsentry->totalsize, DISKQUOTA_TYPE_SCHEMA);
 	}
 }
@@ -1470,7 +1462,7 @@ static void calculate_role_disk_usage()
 			continue;
 		}
 		ReleaseSysCache(tuple);
-		elog(LOG,"check role:%u with usage:%ld", rolentry->owneroid, rolentry->totalsize);
+		elog(DEBUG1, "check role:%u with usage:%ld", rolentry->owneroid, rolentry->totalsize);
 		check_disk_quota_by_oid(rolentry->owneroid, rolentry->totalsize, DISKQUOTA_TYPE_ROLE);
 	}
 }
@@ -1502,7 +1494,7 @@ static void build_active_table_map()
 		bool found_entry;
 		PgStat_StatTabEntry *stat_entry;
 
-		stat_entry = pgstat_fetch_stat_tabentry(hash_entry->t_id);
+		stat_entry = pgstat_fetch_stat_tabentry(hash_entry->reloid);
 		if (stat_entry == NULL) {
 			continue;
 		}
@@ -1521,7 +1513,7 @@ static void build_active_table_map()
 			hash_entry->t_entry.vacuum_count = stat_entry->vacuum_count;
 
 			/* Add this entry to active hash table if not exist */
-			hash_search(pgstat_active_table_map, &hash_entry->t_id, HASH_ENTER, &found_entry);
+			hash_search(pgstat_active_table_map, &hash_entry->reloid, HASH_ENTER, &found_entry);
 
 		} 
 	}
@@ -1535,15 +1527,14 @@ static void
 refresh_disk_quota_model(void)
 {
 	reset_local_black_map();
-	StartTransactionCommand();
-	/* */
-	calculate_table_disk_usage();
-	/**/
-	calculate_schema_disk_usage();
-	/* need to consider parent role?*/
-	calculate_role_disk_usage();
 	
+	/* recalculate the disk usage of table, schema and role */
+	StartTransactionCommand();
+	calculate_table_disk_usage();
+	calculate_schema_disk_usage();
+	calculate_role_disk_usage();
 	CommitTransactionCommand();
+
 	flush_local_black_map();
 }
 
@@ -1685,6 +1676,11 @@ DiskQuotaShmemInit(void)
 		Assert(found);
 	
 }
+
+/*
+ * Assign the database with disk quota enabled into the 
+ * DiskQuotaWorkItem struct.
+ */
 static void
 init_worker_parameters()
 {
@@ -1744,6 +1740,11 @@ get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid)
 		return;
 	}
 }
+
+/*
+ * Enforcement operator to check if the quota limit of a database
+ * object is reached.
+ */
 bool
 CheckTableQuota(RangeTblEntry *rte)
 {
