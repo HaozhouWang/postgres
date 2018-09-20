@@ -586,10 +586,9 @@ ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation)
 			return false;
 		}
 
-		if (!CheckTableQuota(rte->relid))
+		if (!CheckTableQuota(rte))
 		{
-			ereport(ERROR,(errcode(ERRCODE_DISK_FULL),
-					errmsg("user's disk space quota exceeded")));
+			return false;
 		}
 	}
 

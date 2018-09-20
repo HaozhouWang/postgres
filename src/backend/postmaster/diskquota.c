@@ -79,6 +79,7 @@
 #include "catalog/pg_tablespace.h"
 #include "commands/dbcommands.h"
 #include "commands/vacuum.h"
+#include "executor/executor.h"
 #include "lib/ilist.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
@@ -134,7 +135,6 @@ static bool am_diskquota_worker = false;
 static volatile sig_atomic_t got_SIGHUP = false;
 static volatile sig_atomic_t got_SIGUSR2 = false;
 static volatile sig_atomic_t got_SIGTERM = false;
-
 
 /* Memory context for long-lived data */
 static MemoryContext diskquotaMemCxt;
@@ -323,6 +323,7 @@ static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
 static bool check_table_is_active(Oid reloid);
 static void build_active_table_map();
+static bool check_table_quota(Oid reloid, bool ereport_on_violation);
 /********************************************************************
  *					  DISKQUOTA LAUNCHER CODE
  ********************************************************************/
@@ -1812,17 +1813,31 @@ get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid)
 		return;
 	}
 }
-
-bool CheckTableQuota(Oid reloid)
+bool
+CheckTableQuota(RangeTblEntry *rte)
 {
 	bool found;
 	Oid ownerOid = InvalidOid;
 	Oid nsOid = InvalidOid;
+	Oid reloid;
+
+	/* see ExecCheckRTEPerms() */
+	if (rte->rtekind != RTE_RELATION)
+		return true;
+
+	/* check for insert and update tables */
+	if ((rte->requiredPerms & ACL_INSERT) == 0 && (rte->requiredPerms & ACL_UPDATE) == 0)
+		return true;
+
+	reloid = rte->relid;
 	hash_search(disk_quota_black_map, 
 				&reloid,
 				HASH_FIND, &found);
 	if (found) 
 	{
+		ereport(ERROR,
+				(errcode(ERRCODE_DISK_FULL),
+				 errmsg("table's disk space quota exceeded")));
 		return false;
 	}
 	
@@ -1834,6 +1849,9 @@ bool CheckTableQuota(Oid reloid)
 				HASH_FIND, &found);
 		if (found) 
 		{
+			ereport(ERROR,
+					(errcode(ERRCODE_DISK_FULL),
+					 errmsg("schema's disk space quota exceeded")));
 			return false;
 		}
 		
@@ -1846,6 +1864,9 @@ bool CheckTableQuota(Oid reloid)
 				HASH_FIND, &found);
 		if (found) 
 		{
+			ereport(ERROR,
+					(errcode(ERRCODE_DISK_FULL),
+					 errmsg("role's disk space quota exceeded")));
 			return false;
 		}
 	}

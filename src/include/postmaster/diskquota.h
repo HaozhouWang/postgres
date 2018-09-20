@@ -14,6 +14,7 @@
 #ifndef DISKQUOTA_H
 #define DISKQUOTA_H
 
+#include "nodes/parsenodes.h"
 #include "storage/block.h"
 
 /* GUC variables */
@@ -67,5 +68,5 @@ extern void DiskquotaLauncherIAm(void);
 extern Size DiskQuotaShmemSize(void);
 extern void DiskQuotaShmemInit(void);
 
-extern bool CheckTableQuota(Oid reloid);
+extern bool CheckTableQuota(RangeTblEntry *rte);
 #endif							/* DISKQUOTA_H */
