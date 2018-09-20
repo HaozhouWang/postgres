@@ -3028,6 +3028,13 @@ ProcessInterrupts(void)
 					(errcode(ERRCODE_QUERY_CANCELED),
 					 errmsg("canceling autovacuum task")));
 		}
+		if (IsDiskQuotaWorkerProcess())
+		{
+			LockErrorCleanup();
+			ereport(ERROR,
+					(errcode(ERRCODE_QUERY_CANCELED),
+					 errmsg("canceling diskquota task")));
+		}
 		if (RecoveryConflictPending)
 		{
 			RecoveryConflictPending = false;

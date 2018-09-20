@@ -505,16 +505,12 @@ DiskQuotaLauncherMain(int argc, char *argv[])
 
 	/* Identify myself via ps */
 	init_ps_display(pgstat_get_backend_desc(B_DISKQUOTA_LAUNCHER), "", "", "");
-	elog(WARNING, "worker hubert4");
-    elog(WARNING, "guc_dq_databases='%s'\n", guc_dq_database_list);
-	ereport(DEBUG1,
-			(errmsg("diskquota launcher started")));
+    elog(LOG, "disk quota enabled database list:'%s'\n", guc_dq_database_list);
 
 	if (PostAuthDelay)
 		pg_usleep(PostAuthDelay * 1000000L);
 
 	SetProcessingMode(InitProcessing);
-	elog(WARNING, "worker hubert5");
 	/*
 	 * Set up signal handlers.  We operate on databases much like a regular
 	 * backend, so we use the same signal handling.  See equivalent code in
@@ -533,10 +529,8 @@ DiskQuotaLauncherMain(int argc, char *argv[])
 	pqsignal(SIGFPE, FloatExceptionHandler);
 	pqsignal(SIGCHLD, SIG_DFL);
 
-	elog(WARNING, "worker hubert6");
 	/* Early initialization */
 	BaseInit();
-	elog(WARNING, "worker hubert7");
 	/*
 	 * Create a per-backend PGPROC struct in shared memory, except in the
 	 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do
@@ -546,10 +540,8 @@ DiskQuotaLauncherMain(int argc, char *argv[])
 #ifndef EXEC_BACKEND
 	InitProcess();
 #endif
-	elog(WARNING, "worker hubert8");
 	InitPostgres(NULL, InvalidOid, NULL, InvalidOid, NULL, false);
 
-	elog(WARNING, "worker hubert10");
 	SetProcessingMode(NormalProcessing);
 
 	/*
@@ -884,7 +876,6 @@ DiskQuotaWorkerMain(int argc, char *argv[])
 
 	am_diskquota_worker = true;
 
-	elog(WARNING, "Start worker wuhao 1");
 	/* Identify myself via ps */
 	init_ps_display(pgstat_get_backend_desc(B_DISKQUOTA_WORKER), "", "", "");
 
@@ -914,7 +905,6 @@ DiskQuotaWorkerMain(int argc, char *argv[])
 
 	/* Early initialization */
 	BaseInit();
-	elog(WARNING, "Start worker wuhao 1");
 	/*
 	 * Create a per-backend PGPROC struct in shared memory, except in the
 	 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do
@@ -992,12 +982,10 @@ DiskQuotaWorkerMain(int argc, char *argv[])
 		SetConfigOption("synchronous_commit", "local",
 						PGC_SUSET, PGC_S_OVERRIDE);
 
-	elog(WARNING, "Start worker wuhao 4");
 	/*
 	 * Get the info about the database we're going to work on.
 	 */
 	LWLockAcquire(DiskQuotaLock, LW_EXCLUSIVE);
-	elog(WARNING, "Start worker wuhao 5");
 	/*
 	 * beware of startingWorker being INVALID; this should normally not
 	 * happen, but if a worker fails after forking and before this, the
@@ -1007,13 +995,8 @@ DiskQuotaWorkerMain(int argc, char *argv[])
 	if (DiskQuotaShmem->dq_startingWorker != NULL)
 	{
         myWorkItem = DiskQuotaShmem->dq_startingWorker;
-		elog(WARNING, "Start worker wuhao 6");
 		dbid = myWorkItem->dqw_database;
         myWorkItem->dqw_state = WIS_RUNNING;
-		elog(WARNING, "Start worker wuhao dbid:%u", dbid);
-
-		/* insert into the running list */
-		elog(WARNING, "Start worker wuhao 6.1");
 
 		/*
 		 * remove from the "starting" pointer, so that the launcher can start
@@ -1022,7 +1005,6 @@ DiskQuotaWorkerMain(int argc, char *argv[])
 		DiskQuotaShmem->dq_startingWorker = NULL;
 		LWLockRelease(DiskQuotaLock);
 
-		elog(WARNING, "Start worker wuhao 6.2");
 		on_shmem_exit(FreeWorkerInfo, 0);
 
 		/* wake up the launcher */
@@ -1031,14 +1013,9 @@ DiskQuotaWorkerMain(int argc, char *argv[])
 	}
 	else
 	{
-		elog(WARNING, "Start worker wuhao 8");
-		/* no worker entry for me, go away */
-		elog(WARNING, "diskquota worker started without a worker entry");
 		dbid = InvalidOid;
 		LWLockRelease(DiskQuotaLock);
 	}
-
-    elog(WARNING, "dbid = %d", (int)dbid);
 
 	if (OidIsValid(dbid))
 	{

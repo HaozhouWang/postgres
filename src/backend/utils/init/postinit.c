@@ -320,7 +320,7 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 	 * a way to recover from disabling all access to all databases, for
 	 * example "UPDATE pg_database SET datallowconn = false;".
 	 *
-	 * We do not enforce them for autovacuum worker processes either.
+	 * We do not enforce them for autovacuum/diskquota worker processes either.
 	 */
 	if (IsUnderPostmaster && !IsAutoVacuumWorkerProcess() && !IsDiskQuotaWorkerProcess())
 	{
@@ -504,9 +504,9 @@ InitializeMaxBackends(void)
 {
 	Assert(MaxBackends == 0);
 
-	/* the extra unit accounts for the autovacuum launcher */
-	MaxBackends = MaxConnections + autovacuum_max_workers + 1 +
-		max_worker_processes;
+	/* the extra unit accounts for the autovacuum and diskquota launcher */
+	MaxBackends = MaxConnections + autovacuum_max_workers + diskquota_max_workers
+			+ 2 + max_worker_processes;
 
 	/* internal error because the values were all checked previously */
 	if (MaxBackends > MAX_BACKENDS)
@@ -671,7 +671,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 */
 	before_shmem_exit(ShutdownPostgres, 0);
 
-	/* The autovacuum launcher is done here */
+	/* The autovacuum and diskquota launcher is done here */
 	if (IsAutoVacuumLauncherProcess()|| IsDiskQuotaLauncherProcess())
 	{
 		/* report this backend in the PgBackendStatus array */
@@ -709,7 +709,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 * Perform client authentication if necessary, then figure out our
 	 * postgres user ID, and see if we are a superuser.
 	 *
-	 * In standalone mode and in autovacuum worker processes, we use a fixed
+	 * In standalone mode and in autovacuum/diskquota worker processes, we use a fixed
 	 * ID, otherwise we figure it out from the authenticated user name.
 	 */
 	if (bootstrap || IsAutoVacuumWorkerProcess() || IsDiskQuotaWorkerProcess())
