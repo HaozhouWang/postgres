@@ -154,8 +154,7 @@ struct LocalBlackMapEntry
 };
 
 /*
- * Get active table list by fetch pgstat information
- * Hash table for O(1) reloid -> tsa_entry lookup
+ * Get active table list to check their size
  */
 static HTAB *pgstat_table_map = NULL;
 static HTAB *pgstat_active_table_map = NULL;
@@ -169,19 +168,19 @@ typedef struct DiskQuotaLocalTableCache
 	PgStat_Counter tuples_deleted;
 	PgStat_Counter vacuum_count;
 	PgStat_Counter autovac_vacuum_count;
-
+	PgStat_Counter tuples_living;
 } DiskQuotaLocalTableCache;
 
 /* struct to describe the active table */
 typedef struct DiskQuotaActiveHashEntry
 {
 	Oid			reloid;
-	PgStat_Counter t_refcount;
+	PgStat_Counter t_refcount; /* TODO: using refcount for active queue */
 } DiskQuotaActiveHashEntry;
 
 
 /*
- * pgstat_table_map entry: map from relation OID to PgStat_TableStatus pointer
+ * disk_quota_table_stat entry: store the last checked results of table status
  */
 typedef struct DiskQuotaStateHashEntry
 {
@@ -263,17 +262,17 @@ static void dql_sigusr2_handler(SIGNAL_ARGS);
 static void dql_sigterm_handler(SIGNAL_ARGS);
 
 static void init_worker_parameters(void);
-static void launcher_init_disk_quota();
-static void launcher_monitor_disk_quota();
+static void launcher_init_disk_quota(void);
+static void launcher_monitor_disk_quota(void);
 static void do_start_worker(DiskQuotaWorkItem *item);
 
 static void init_disk_quota_model(void);
 static void refresh_disk_quota_model(void);
-static void calculate_table_disk_usage();
-static void calculate_schema_disk_usage();
-static void calculate_role_disk_usage();
-static void flush_local_black_map();
-static void reset_local_black_map();
+static void calculate_table_disk_usage(void);
+static void calculate_schema_disk_usage(void);
+static void calculate_role_disk_usage(void);
+static void flush_local_black_map(void);
+static void reset_local_black_map(void);
 static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, int8 diskquota_type);
 static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
 static void update_namespace_map(Oid namespaceoid, int64 updatesize);
@@ -281,7 +280,7 @@ static void update_role_map(Oid owneroid, int64 updatesize);
 static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
 static bool check_table_is_active(Oid reloid);
-static void build_active_table_map();
+static void build_active_table_map(void);
 /********************************************************************
  *					  DISKQUOTA LAUNCHER CODE
  ********************************************************************/
@@ -638,7 +637,6 @@ launcher_init_disk_quota()
 	MemoryContext tmpcxt,
 				oldcxt;
     int idx = 0;
-    int N;
     DiskQuotaWorkItem *item;
     DiskQuotaWorkItem *itemArray;
 
@@ -723,6 +721,128 @@ dql_sigterm_handler(SIGNAL_ARGS)
 	errno = save_errno;
 }
 
+/*
+ * Assign the database with disk quota enabled into the 
+ * DiskQuotaWorkItem struct.
+ */
+static void
+init_worker_parameters()
+{
+    List *dblist;
+    ListCell *cell;
+    int i = 0;
+    DiskQuotaWorkItem *worker;
+
+    dblist = get_database_list();
+    worker = DiskQuotaShmem->dq_workItems;
+
+    foreach(cell, dblist)
+    {
+        char *db_name;
+        Oid db_oid = InvalidOid;
+
+        db_name = (char *)lfirst(cell);
+        if (db_name == NULL || *db_name == '\0')
+        {
+            elog(WARNING, "invalid db name='%s'", db_name);
+            continue;
+        }
+        db_oid = db_name_to_oid(db_name);
+        if (db_oid == InvalidOid)
+        {
+            elog(WARNING, "cann't find oid for db='%s'", db_name);
+            continue;
+        }
+        if (i>=diskquota_max_workers)
+        {
+            elog(WARNING, "diskquota_max_workers<NUM_WORKITEMS: %d - %d\n", diskquota_max_workers, NUM_WORKITEMS);
+            break;
+        }
+        worker[i].dqw_database = db_oid;
+        elog(WARNING, "db_name[%d] = '%s' oid=%d", i, db_name, db_oid);
+        ++i;
+    }
+}
+
+/*
+ * IsDiskQuota functions
+ * Return whether this is either a launcher diskquota process
+ */
+bool
+IsDiskQuotaLauncherProcess(void)
+{
+	return am_diskquota_launcher;
+}
+/*
+ * DiskQuotaShmemSize
+ *		Compute space needed for diskquota-related shared memory
+ */
+Size
+DiskQuotaShmemSize(void)
+{
+	Size		size;
+
+	size = sizeof(DiskQuotaShmemStruct);
+	size = MAXALIGN(size);
+	size = add_size(size, hash_estimate_size(MAX_DISK_QUOTA_BLACK_ENTRIES, sizeof(BlackMapEntry)));
+	return size;
+}
+
+/*
+ * DiskQuotaShmemInit
+ *		Allocate and initialize diskquota-related shared memory
+ */
+void
+DiskQuotaShmemInit(void)
+{
+	bool		found;
+	HASHCTL		hash_ctl;
+
+	DiskQuotaShmem = (DiskQuotaShmemStruct *)
+		ShmemInitStruct("DiskQuota Data",
+						DiskQuotaShmemSize(),
+						&found);
+
+	memset(&hash_ctl, 0, sizeof(hash_ctl));
+	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.entrysize = sizeof(BlackMapEntry);
+	hash_ctl.alloc = ShmemAllocNoError;
+	hash_ctl.dsize = hash_ctl.max_dsize = hash_select_dirsize(MAX_DISK_QUOTA_BLACK_ENTRIES);
+	disk_quota_black_map = ShmemInitHash("blackmap whose quota limitation is reached",
+									INIT_DISK_QUOTA_BLACK_ENTRIES,
+									MAX_DISK_QUOTA_BLACK_ENTRIES,
+									&hash_ctl,
+									HASH_DIRSIZE | HASH_SHARED_MEM | HASH_ALLOC | HASH_ELEM | HASH_BLOBS);
+
+
+	if (!IsUnderPostmaster)
+	{
+		Assert(!found);
+
+		DiskQuotaShmem->dq_launcherpid = 0;
+		DiskQuotaShmem->dq_startingWorker = NULL;
+		memset(DiskQuotaShmem->dq_workItems, 0,
+			   sizeof(DiskQuotaWorkItem) * NUM_WORKITEMS);
+	}
+	else
+		Assert(found);
+	
+}
+
+/*
+ * database list found in guc
+ */
+static List *
+get_database_list(void)
+{
+	List	   *dblist = NULL;
+    if (!SplitIdentifierString(guc_dq_database_list, ',', &dblist))
+    {
+        elog(FATAL, "cann't get database list from guc:'%s'", guc_dq_database_list);
+        return NULL;
+    }
+	return dblist;
+}
 
 /********************************************************************
  *					  DISKQUOTA WORKER CODE
@@ -1023,20 +1143,6 @@ FreeWorkerInfo(int code, Datum arg)
 }
 
 
-/*
- * database list found in guc
- */
-static List *
-get_database_list(void)
-{
-	List	   *dblist = NULL;
-    if (!SplitIdentifierString(guc_dq_database_list, ',', &dblist))
-    {
-        elog(FATAL, "cann't get database list from guc:'%s'", guc_dq_database_list);
-        return NULL;
-    }
-	return dblist;
-}
 
 /*
  * init disk quota model when the worker process firstly started.
@@ -1491,7 +1597,6 @@ static void build_active_table_map()
 	while ((hash_entry = (DiskQuotaStatHashEntry *) hash_seq_search(&status)) != NULL)
 	{
 
-		bool found_entry;
 		PgStat_StatTabEntry *stat_entry;
 
 		stat_entry = pgstat_fetch_stat_tabentry(hash_entry->reloid);
@@ -1503,7 +1608,8 @@ static void build_active_table_map()
 			stat_entry->tuples_updated != hash_entry->t_entry.tuples_updated ||
 			stat_entry->tuples_deleted != hash_entry->t_entry.tuples_deleted ||
 			stat_entry->autovac_vacuum_count !=  hash_entry->t_entry.autovac_vacuum_count ||
-			stat_entry->vacuum_count !=  hash_entry->t_entry.vacuum_count)
+			stat_entry->vacuum_count !=  hash_entry->t_entry.vacuum_count ||
+			stat_entry->n_live_tuples != hash_entry->t_entry.tuples_living)
 		{
 			/* Update the entry */
 			hash_entry->t_entry.tuples_inserted = stat_entry->tuples_inserted;
@@ -1511,9 +1617,10 @@ static void build_active_table_map()
 			hash_entry->t_entry.tuples_deleted = stat_entry->tuples_deleted;
 			hash_entry->t_entry.autovac_vacuum_count = stat_entry->autovac_vacuum_count;
 			hash_entry->t_entry.vacuum_count = stat_entry->vacuum_count;
+			hash_entry->t_entry.tuples_living = stat_entry->n_live_tuples;
 
 			/* Add this entry to active hash table if not exist */
-			hash_search(pgstat_active_table_map, &hash_entry->reloid, HASH_ENTER, &found_entry);
+			hash_search(pgstat_active_table_map, &hash_entry->reloid, HASH_ENTER, NULL);
 
 		} 
 	}
@@ -1603,17 +1710,11 @@ diskquota_init(void)
 				 errhint("Enable the \"track_counts\" option.")));
 }
 
+
 /*
  * IsDiskQuota functions
- *		Return whether this is either a launcher diskquota process or a worker
- *		process.
+ * Return whether this is either a worker diskquota process
  */
-bool
-IsDiskQuotaLauncherProcess(void)
-{
-	return am_diskquota_launcher;
-}
-
 bool
 IsDiskQuotaWorkerProcess(void)
 {
@@ -1621,104 +1722,6 @@ IsDiskQuotaWorkerProcess(void)
 }
 
 
-/*
- * DiskQuotaShmemSize
- *		Compute space needed for diskquota-related shared memory
- */
-Size
-DiskQuotaShmemSize(void)
-{
-	Size		size;
-
-	size = sizeof(DiskQuotaShmemStruct);
-	size = MAXALIGN(size);
-	size = add_size(size, hash_estimate_size(MAX_DISK_QUOTA_BLACK_ENTRIES, sizeof(BlackMapEntry)));
-	return size;
-}
-
-/*
- * DiskQuotaShmemInit
- *		Allocate and initialize diskquota-related shared memory
- */
-void
-DiskQuotaShmemInit(void)
-{
-	bool		found;
-	HASHCTL		hash_ctl;
-
-	DiskQuotaShmem = (DiskQuotaShmemStruct *)
-		ShmemInitStruct("DiskQuota Data",
-						DiskQuotaShmemSize(),
-						&found);
-
-	memset(&hash_ctl, 0, sizeof(hash_ctl));
-	hash_ctl.keysize = sizeof(Oid);
-	hash_ctl.entrysize = sizeof(BlackMapEntry);
-	hash_ctl.alloc = ShmemAllocNoError;
-	hash_ctl.dsize = hash_ctl.max_dsize = hash_select_dirsize(MAX_DISK_QUOTA_BLACK_ENTRIES);
-	disk_quota_black_map = ShmemInitHash("blackmap whose quota limitation is reached",
-									INIT_DISK_QUOTA_BLACK_ENTRIES,
-									MAX_DISK_QUOTA_BLACK_ENTRIES,
-									&hash_ctl,
-									HASH_DIRSIZE | HASH_SHARED_MEM | HASH_ALLOC | HASH_ELEM | HASH_BLOBS);
-
-
-	if (!IsUnderPostmaster)
-	{
-		Assert(!found);
-
-		DiskQuotaShmem->dq_launcherpid = 0;
-		DiskQuotaShmem->dq_startingWorker = NULL;
-		memset(DiskQuotaShmem->dq_workItems, 0,
-			   sizeof(DiskQuotaWorkItem) * NUM_WORKITEMS);
-	}
-	else
-		Assert(found);
-	
-}
-
-/*
- * Assign the database with disk quota enabled into the 
- * DiskQuotaWorkItem struct.
- */
-static void
-init_worker_parameters()
-{
-    List *dblist;
-    ListCell *cell;
-    int i = 0;
-    DiskQuotaWorkItem *worker;
-
-    dblist = get_database_list();
-    worker = DiskQuotaShmem->dq_workItems;
-
-    foreach(cell, dblist)
-    {
-        char *db_name;
-        Oid db_oid = InvalidOid;
-
-        db_name = (char *)lfirst(cell);
-        if (db_name == NULL || *db_name == '\0')
-        {
-            elog(WARNING, "invalid db name='%s'", db_name);
-            continue;
-        }
-        db_oid = db_name_to_oid(db_name);
-        if (db_oid == InvalidOid)
-        {
-            elog(WARNING, "cann't find oid for db='%s'", db_name);
-            continue;
-        }
-        if (i>=diskquota_max_workers)
-        {
-            elog(WARNING, "diskquota_max_workers<NUM_WORKITEMS: %d - %d\n", diskquota_max_workers, NUM_WORKITEMS);
-            break;
-        }
-        worker[i].dqw_database = db_oid;
-        elog(WARNING, "db_name[%d] = '%s' oid=%d", i, db_name, db_oid);
-        ++i;
-    }
-}
 
 static void
 get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid)
