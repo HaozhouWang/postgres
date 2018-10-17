@@ -45,7 +45,7 @@
 #include "storage/shmem.h"
 
 /* these headers are used by this particular worker's code */
-
+#include "commands/dbcommands.h"
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
