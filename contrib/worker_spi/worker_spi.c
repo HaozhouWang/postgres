@@ -227,6 +227,7 @@ static void remove_role_map(Oid owneroid);
 static bool check_table_is_active(Oid reloid);
 static void build_active_table_map(void);
 static int64 calculate_total_relation_size_by_oid(Oid reloid);
+static void load_quotas(void);
 
 static Size DiskQuotaShmemSize(void);
 static void disk_quota_shmem_startup(void);
@@ -564,16 +565,13 @@ reset_local_black_map(void)
  */
 static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage)
 {
-	return ;
-
 	bool					found;
-	HeapTuple				tuple;
 	int32 					quota_limit_mb;
 	int32 					current_usage_mb;
 	LocalBlackMapEntry*	localblackentry;
 
-	QuotaLimitEntry* quotaentry;
-	quotaentry = (QuotaLimitEntry *)hash_search(quota_limit_map,
+	QuotaLimitEntry* quota_entry;
+	quota_entry = (QuotaLimitEntry *)hash_search(quota_limit_map,
 											&targetOid,
 											HASH_FIND, &found);
 	if (!found)
@@ -582,7 +580,7 @@ static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage)
 		return;
 	}
 
-	quota_limit_mb = quotaentry->limitsize;
+	quota_limit_mb = quota_entry->limitsize;
 	current_usage_mb = current_usage / (1024 *1024);
 	if(current_usage_mb > quota_limit_mb)
 	{
@@ -912,20 +910,61 @@ refresh_disk_quota_model(void)
 	reset_local_black_map();
 
 	/* recalculate the disk usage of table, schema and role */
-	StartTransactionCommand();
-	SPI_connect();
-    PushActiveSnapshot(GetTransactionSnapshot());
 
 	calculate_table_disk_usage();
 	calculate_schema_disk_usage();
 	calculate_role_disk_usage();
 
-	SPI_finish();
-    PopActiveSnapshot();
-	CommitTransactionCommand();
-
 	flush_local_black_map();
 }
+
+/*
+ * Load quotas from configuration table.
+ */
+static void
+load_quotas(void)
+{
+	int			ret;
+	TupleDesc	tupdesc;
+	int			i;
+
+
+	ret = SPI_execute("select targetOid, quota int8 from quota.config", true, 0);
+	if (ret != SPI_OK_SELECT)
+		elog(FATAL, "SPI_execute failed: error code %d", ret);
+
+	tupdesc = SPI_tuptable->tupdesc;
+	if (tupdesc->natts != 2 ||
+		TupleDescAttr(tupdesc, 0)->atttypid != OIDOID ||
+		TupleDescAttr(tupdesc, 1)->atttypid != INT8OID)
+		elog(ERROR, "query must yield two columns, oid and int8");
+
+	for (i = 0; i < SPI_processed; i++)
+	{
+		HeapTuple	tup = SPI_tuptable->vals[i];
+		Datum		dat;
+		Oid			targetOid;
+		int64		quota_limit;
+		bool		isnull;
+
+		dat = SPI_getbinval(tup, tupdesc, 1, &isnull);
+		if (isnull)
+			continue;
+		targetOid = DatumGetObjectId(dat);
+
+		dat = SPI_getbinval(tup, tupdesc, 2, &isnull);
+		if (isnull)
+			continue;
+		quota_limit = DatumGetInt64(dat);
+
+		QuotaLimitEntry* quota_entry;
+		quota_entry = (QuotaLimitEntry *)hash_search(quota_limit_map,
+												&targetOid,
+												HASH_ENTER, &found);
+		quota_entry->limitsize = quota_limit;
+	}
+}
+
 
 
 /*
@@ -1096,9 +1135,6 @@ init_disk_quota_model(void)
 									&ctl,
 									HASH_ELEM);
 	}
-
-	/* calcualte the disk usage for each database objects */
-	refresh_disk_quota_model();
 }
 
 
@@ -1168,6 +1204,16 @@ disk_quota_worker_spi_main(Datum main_arg)
 		//int			ret;
 		int			rc;
 
+		StartTransactionCommand();
+		SPI_connect();
+		PushActiveSnapshot(GetTransactionSnapshot());
+		load_quotas();
+		build_active_table_map();
+		refresh_disk_quota_model();
+		SPI_finish();
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+
 		/*
 		 * Background workers mustn't call usleep() or any direct equivalent:
 		 * instead, they may wait on their process latch, which sleeps as
@@ -1214,8 +1260,6 @@ disk_quota_worker_spi_main(Datum main_arg)
 		//PushActiveSnapshot(GetTransactionSnapshot());
 		//pgstat_report_activity(STATE_RUNNING, buf.data);
 
-		build_active_table_map();
-		refresh_disk_quota_model();
 
 		/* We can now execute queries via SPI */
 		/*ret = SPI_execute(buf.data, false, 0);
