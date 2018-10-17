@@ -23,6 +23,12 @@
 #include "postgres.h"
 
 /* These are always necessary for a bgworker */
+#include "access/heapam.h"
+#include "access/htup_details.h"
+#include "access/multixact.h"
+#include "access/reloptions.h"
+#include "access/transam.h"
+#include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -38,13 +44,13 @@
 #include "storage/shmem.h"
 
 /* these headers are used by this particular worker's code */
-#include "access/xact.h"
+
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "pgstat.h"
 #include "utils/builtins.h"
-#include "utils/dbsize.h"
+//#include "utils/dbsize.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -61,6 +67,19 @@
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(worker_spi_launch);
+
+
+/* cluster level max size of black list */
+#define MAX_DISK_QUOTA_BLACK_ENTRIES 8192 * 1024
+/* cluster level init size of black list */
+#define INIT_DISK_QUOTA_BLACK_ENTRIES 8192
+/* per database level max size of black list */
+#define MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES 8192
+/* max number of disk quota worker process */
+#define NUM_WORKITEMS			10
+/* initial active table size */
+#define INIT_ACTIVE_TABLE_SIZE	64
+
 
 void		_PG_init(void);
 void		worker_spi_main(Datum);
@@ -531,7 +550,7 @@ reset_local_black_map(void)
  */
 static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, int8 diskquota_type)
 {
-	return void;
+	return ;
 	/*
 	bool					found;
 	HeapTuple				tuple;
@@ -655,7 +674,7 @@ calculate_table_disk_usage(void)
 	HASH_SEQ_STATUS iter;
 
 	classRel = heap_open(RelationRelationId, AccessShareLock);
-	relScan = heap_beginscan(classRel, 0, NULL);
+	relScan = heap_beginscan_catalog(classRel, 0, NULL);
 
 	while ((tuple = heap_getnext(relScan, ForwardScanDirection)) != NULL)
 	{
@@ -761,7 +780,7 @@ static void calculate_schema_disk_usage(void)
 		}
 		ReleaseSysCache(tuple);
 		elog(DEBUG1, "check namespace:%u with usage:%ld", nsentry->namespaceoid, nsentry->totalsize);
-		check_disk_quota_by_oid(nsentry->namespaceoid, nsentry->totalsize, DISKQUOTA_TYPE_SCHEMA);
+		//check_disk_quota_by_oid(nsentry->namespaceoid, nsentry->totalsize, DISKQUOTA_TYPE_SCHEMA);
 	}
 }
 
@@ -783,7 +802,7 @@ static void calculate_role_disk_usage(void)
 		}
 		ReleaseSysCache(tuple);
 		elog(DEBUG1, "check role:%u with usage:%ld", rolentry->owneroid, rolentry->totalsize);
-		check_disk_quota_by_oid(rolentry->owneroid, rolentry->totalsize, DISKQUOTA_TYPE_ROLE);
+		//check_disk_quota_by_oid(rolentry->owneroid, rolentry->totalsize, DISKQUOTA_TYPE_ROLE);
 	}
 }
 
