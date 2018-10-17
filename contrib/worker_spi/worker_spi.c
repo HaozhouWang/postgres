@@ -109,6 +109,7 @@ typedef struct worktable
 typedef struct TableSizeEntry TableSizeEntry;
 typedef struct NamespaceSizeEntry NamespaceSizeEntry;
 typedef struct RoleSizeEntry RoleSizeEntry;
+typedef struct QuotaLimitEntry QuotaLimitEntry;
 typedef struct BlackMapEntry BlackMapEntry;
 typedef struct LocalBlackMapEntry LocalBlackMapEntry;
 
@@ -133,6 +134,13 @@ struct RoleSizeEntry
 {
 	Oid			owneroid;
 	int64		totalsize;
+};
+
+/* local cache of disk quota limit */
+struct QuotaLimitEntry
+{
+	Oid			targetoid;
+	int64		limitsize;
 };
 
 /* global blacklist for which exceed their quota limit */
@@ -188,6 +196,7 @@ typedef struct DiskQuotaStateHashEntry
 static HTAB *table_size_map = NULL;
 static HTAB *namespace_size_map = NULL;
 static HTAB *role_size_map = NULL;
+static HTAB *quota_limit_map = NULL;
 
 /* black list for database objects which exceed their quota limit */
 static HTAB *disk_quota_black_map = NULL;
@@ -553,36 +562,38 @@ reset_local_black_map(void)
  * Compare the disk quota limit and current usage of a database object.
  * Put them into local blacklist if quota limit is exceeded.
  */
-static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, int8 diskquota_type)
+static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage)
 {
 	return ;
-	/*
+
 	bool					found;
 	HeapTuple				tuple;
 	int32 					quota_limit_mb;
 	int32 					current_usage_mb;
 	LocalBlackMapEntry*	localblackentry;
 
-	tuple = SearchSysCache1(DISKQUOTATARGETOID, ObjectIdGetDatum(targetOid));
-	if (!HeapTupleIsValid(tuple))
+	QuotaLimitEntry* quotaentry;
+	quotaentry = (QuotaLimitEntry *)hash_search(quota_limit_map,
+											&targetOid,
+											HASH_FIND, &found);
+	if (!found)
 	{
-		// default no limit
+		/* default no limit */
 		return;
 	}
-	quota_limit_mb = ((Form_pg_diskquota) GETSTRUCT(tuple))->quotalimit;
-	ReleaseSysCache(tuple);
 
+	quota_limit_mb = quotaentry->limitsize;
 	current_usage_mb = current_usage / (1024 *1024);
 	if(current_usage_mb > quota_limit_mb)
 	{
-		elog(DEBUG1,"Put object %u to blacklist with quota limit:%d, current usage:%d",
+		elog(LOG,"Put object %u to blacklist with quota limit:%d, current usage:%d",
 				targetOid, quota_limit_mb, current_usage_mb);
 		localblackentry = (LocalBlackMapEntry*) hash_search(local_disk_quota_black_map,
 					&targetOid,
 					HASH_ENTER, &found);
 		localblackentry->isexceeded = true;
 	}
-	*/
+
 }
 
 static void
@@ -665,12 +676,12 @@ static int64 calculate_total_relation_size_by_oid(Oid reloid)
 	StringInfoData buf;
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "select pg_total_relation_size(%d);", reloid);
+	appendStringInfo(&buf, "select pg_total_relation_size(%u);", reloid);
 
 	ret = SPI_execute(buf.data, false, 0);
 
 	if (ret != SPI_OK_SELECT)
-		elog(FATAL, "cannot get table size %d error code %d",reloid, ret);
+		elog(FATAL, "cannot get table size %u error code %d",reloid, ret);
 	if (SPI_processed > 0)
 	{
 		bool		isnull;
@@ -733,7 +744,7 @@ calculate_table_disk_usage(void)
 			tsentry->namespaceoid = classForm->relnamespace;
 			tsentry->owneroid = classForm->relowner;
 			tsentry->totalsize = calculate_total_relation_size_by_oid(relOid);
-			elog(LOG, "table: %d, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
+			elog(LOG, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
 			update_namespace_map(tsentry->namespaceoid, tsentry->totalsize);
 			update_role_map(tsentry->owneroid, tsentry->totalsize);
 			/* add to pgstat_table_map hash map */
@@ -744,14 +755,14 @@ calculate_table_disk_usage(void)
 			/* if table size is modified*/
 			int64 oldtotalsize = tsentry->totalsize;
 			tsentry->totalsize = calculate_total_relation_size_by_oid(relOid);
-            elog(LOG, "table: %d, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
+            elog(LOG, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
 
 			update_namespace_map(tsentry->namespaceoid, tsentry->totalsize - oldtotalsize);
 			update_role_map(tsentry->owneroid, tsentry->totalsize - oldtotalsize);
 		}
 		/* check the disk quota limit TODO only check the modified table */
 		//TODO
-		//check_disk_quota_by_oid(tsentry->reloid, tsentry->totalsize, DISKQUOTA_TYPE_TABLE);
+		check_disk_quota_by_oid(tsentry->reloid, tsentry->totalsize);
 
 		/* if schema change */
 		if (tsentry->namespaceoid != classForm->relnamespace)
@@ -812,7 +823,7 @@ static void calculate_schema_disk_usage(void)
 		}
 		ReleaseSysCache(tuple);
 		elog(DEBUG1, "check namespace:%u with usage:%ld", nsentry->namespaceoid, nsentry->totalsize);
-		//check_disk_quota_by_oid(nsentry->namespaceoid, nsentry->totalsize, DISKQUOTA_TYPE_SCHEMA);
+		check_disk_quota_by_oid(nsentry->namespaceoid, nsentry->totalsize);
 	}
 }
 
@@ -834,7 +845,7 @@ static void calculate_role_disk_usage(void)
 		}
 		ReleaseSysCache(tuple);
 		elog(DEBUG1, "check role:%u with usage:%ld", rolentry->owneroid, rolentry->totalsize);
-		//check_disk_quota_by_oid(rolentry->owneroid, rolentry->totalsize, DISKQUOTA_TYPE_ROLE);
+		check_disk_quota_by_oid(rolentry->owneroid, rolentry->totalsize);
 	}
 }
 
@@ -1034,6 +1045,17 @@ init_disk_quota_model(void)
 	hash_ctl.hcxt = DSModelContext;
 
 	role_size_map = hash_create("RoleSizeEntry map",
+								1024,
+								&hash_ctl,
+								HASH_ELEM | HASH_CONTEXT);
+
+
+	memset(&hash_ctl, 0, sizeof(hash_ctl));
+	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.entrysize = sizeof(QuotaLimitEntry);
+	hash_ctl.hcxt = DSModelContext;
+
+	quota_limit_map = hash_create("QuotaLimitEntry map",
 								1024,
 								&hash_ctl,
 								HASH_ELEM | HASH_CONTEXT);
