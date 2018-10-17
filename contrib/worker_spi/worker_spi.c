@@ -84,6 +84,7 @@ PG_FUNCTION_INFO_V1(worker_spi_launch);
 void		_PG_init(void);
 
 void		worker_spi_main(Datum);
+void		disk_quota_worker_spi_main(Datum);
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
@@ -103,7 +104,7 @@ typedef struct worktable
 
 
 /* Memory context for long-lived data */
-static MemoryContext diskquotaMemCxt;
+//static MemoryContext diskquotaMemCxt;
 
 typedef struct TableSizeEntry TableSizeEntry;
 typedef struct NamespaceSizeEntry NamespaceSizeEntry;
@@ -200,7 +201,7 @@ static disk_quota_shared_state *shared;
 
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
-
+static void init_disk_quota_shmem(void);
 static void init_disk_quota_model(void);
 static void refresh_disk_quota_model(void);
 static void calculate_table_disk_usage(void);
@@ -972,7 +973,7 @@ disk_quota_shmem_startup(void)
 	LWLockRelease(AddinShmemInitLock);
 }
 
-void
+static void
 init_disk_quota_shmem(void)
 {
 	/*
@@ -1141,7 +1142,7 @@ disk_quota_worker_spi_main(Datum main_arg)
 	 */
 	while (!got_sigterm)
 	{
-		int			ret;
+		//int			ret;
 		int			rc;
 
 		/*
