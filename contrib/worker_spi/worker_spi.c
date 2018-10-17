@@ -49,6 +49,7 @@
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "nodes/makefuncs.h"
 #include "pgstat.h"
 #include "utils/builtins.h"
 //#include "utils/dbsize.h"
