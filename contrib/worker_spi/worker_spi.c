@@ -929,6 +929,7 @@ load_quotas(void)
 	TupleDesc	tupdesc;
 	int			i;
 	bool		found;
+	QuotaLimitEntry* quota_entry;
 
 
 	ret = SPI_execute("select targetOid, quota int8 from quota.config", true, 0);
@@ -959,7 +960,6 @@ load_quotas(void)
 			continue;
 		quota_limit = DatumGetInt64(dat);
 
-		QuotaLimitEntry* quota_entry;
 		quota_entry = (QuotaLimitEntry *)hash_search(quota_limit_map,
 												&targetOid,
 												HASH_ENTER, &found);
