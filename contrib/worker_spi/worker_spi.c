@@ -216,6 +216,7 @@ static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
 static bool check_table_is_active(Oid reloid);
 static void build_active_table_map(void);
+static int64 calculate_total_relation_size_by_oid(Oid reloid);
 
 static Size DiskQuotaShmemSize(void);
 static void disk_quota_shmem_startup(void);
@@ -657,6 +658,32 @@ remove_pgstat_map(Oid relOid)
 	hash_search(pgstat_table_map, &relOid, HASH_REMOVE, NULL);
 }
 
+static int64 calculate_total_relation_size_by_oid(Oid reloid)
+{
+	int ret;
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "select pg_total_relation_size(%d);", reloid);
+
+	ret = SPI_execute(buf.data, false, 0);
+
+	if (ret != SPI_OK_SELECT)
+		elog(FATAL, "cannot get table size %d error code %d",reloid, ret);
+	if (SPI_processed > 0)
+	{
+		bool		isnull;
+		int64		val;
+
+		val = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+										  SPI_tuptable->tupdesc,
+										  1, &isnull));
+		if (!isnull){
+			return val;
+		}
+	}
+	return 0;
+}
 /*
  *  Incremental way to update the disk quota of every database objects
  *  Recalculate the table's disk usage when it's a new table or be update.
