@@ -23,6 +23,12 @@
 #include "postgres.h"
 
 /* These are always necessary for a bgworker */
+#include "catalog/dependency.h"
+#include "catalog/indexing.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_database.h"
+#include "catalog/pg_tablespace.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
@@ -38,7 +44,18 @@
 #include "lib/stringinfo.h"
 #include "pgstat.h"
 #include "utils/builtins.h"
+#include "utils/dbsize.h"
+#include "utils/fmgroids.h"
+#include "utils/lsyscache.h"
+#include "utils/memutils.h"
+#include "utils/ps_status.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/syscache.h"
+#include "utils/timeout.h"
+#include "utils/timestamp.h"
+#include "utils/tqual.h"
+#include "utils/builtins.h"
 #include "tcop/utility.h"
 
 PG_MODULE_MAGIC;
@@ -433,7 +450,7 @@ flush_local_black_map(void)
 	BlackMapEntry* blackentry;
 	bool found;
 
-	LWLockAcquire(DiskQuotaLock, LW_EXCLUSIVE);
+	LWLockAcquire(shared->lock, LW_EXCLUSIVE);
 
 	hash_seq_init(&iter, local_disk_quota_black_map);
 	while ((localblackentry = hash_seq_search(&iter)) != NULL)
@@ -465,7 +482,7 @@ flush_local_black_map(void)
 							   HASH_REMOVE, NULL);
 		}
 	}
-	LWLockRelease(DiskQuotaLock);
+	LWLockRelease(shared->lock);
 }
 
 /* fetch the new blacklist from shared blacklist at each refresh iteration. */
@@ -487,7 +504,7 @@ reset_local_black_map(void)
 	}
 
 	/* get black map copy from shared black map */
-	LWLockAcquire(DiskQuotaLock, LW_SHARED);
+	LWLockAcquire(shared->lock, LW_SHARED);
 	hash_seq_init(&iter, disk_quota_black_map);
 	while ((blackentry = hash_seq_search(&iter)) != NULL)
 	{
@@ -504,7 +521,7 @@ reset_local_black_map(void)
 			}
 		}
 	}
-	LWLockRelease(DiskQuotaLock);
+	LWLockRelease(shared->lock);
 
 }
 
@@ -638,7 +655,7 @@ calculate_table_disk_usage(void)
 	HASH_SEQ_STATUS iter;
 
 	classRel = heap_open(RelationRelationId, AccessShareLock);
-	relScan = heap_beginscan(classRel, SnapshotNow, 0, NULL);
+	relScan = heap_beginscan(classRel, 0, NULL);
 
 	while ((tuple = heap_getnext(relScan, ForwardScanDirection)) != NULL)
 	{
@@ -682,7 +699,8 @@ calculate_table_disk_usage(void)
 			update_role_map(tsentry->owneroid, tsentry->totalsize - oldtotalsize);
 		}
 		/* check the disk quota limit TODO only check the modified table */
-		check_disk_quota_by_oid(tsentry->reloid, tsentry->totalsize, DISKQUOTA_TYPE_TABLE);
+		//TODO
+		//check_disk_quota_by_oid(tsentry->reloid, tsentry->totalsize, DISKQUOTA_TYPE_TABLE);
 
 		/* if schema change */
 		if (tsentry->namespaceoid != classForm->relnamespace)
