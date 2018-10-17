@@ -928,6 +928,7 @@ load_quotas(void)
 	int			ret;
 	TupleDesc	tupdesc;
 	int			i;
+	bool		found;
 
 
 	ret = SPI_execute("select targetOid, quota int8 from quota.config", true, 0);
