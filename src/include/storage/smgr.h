@@ -145,4 +145,7 @@ extern void ForgetRelationFsyncRequests(RelFileNode rnode, ForkNumber forknum);
 extern void ForgetDatabaseFsyncRequests(Oid dbid);
 extern void DropRelationFiles(RelFileNode *delrels, int ndelrels, bool isRedo);
 
+typedef void (*SmgrStat_hook_type)(SMgrRelation sreln);
+extern PGDLLIMPORT SmgrStat_hook_type SmgrStat_hook;
+
 #endif							/* SMGR_H */
