@@ -931,6 +931,20 @@ load_quotas(void)
 	bool		found;
 	QuotaLimitEntry* quota_entry;
 
+	RangeVar   *rv;
+	Relation	rel;
+
+	rv = makeRangeVar("quota", "config", -1);
+	rel = heap_openrv_extended(rv, AccessShareLock, true);
+	if (!rel)
+	{
+		/* configuration table is missing. */
+		elog(LOG, "configuration table \"pg_quota.quotas\" is missing in database \"%s\"",
+			 get_database_name(MyDatabaseId));
+		heap_close(rel, NoLock);
+		return;
+	}
+	heap_close(rel, NoLock);
 
 	ret = SPI_execute("select targetOid, quota int8 from quota.config", true, 0);
 	if (ret != SPI_OK_SELECT)
@@ -965,6 +979,7 @@ load_quotas(void)
 												HASH_ENTER, &found);
 		quota_entry->limitsize = quota_limit;
 	}
+
 }
 
 
