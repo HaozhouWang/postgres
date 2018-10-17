@@ -733,6 +733,7 @@ calculate_table_disk_usage(void)
 			tsentry->namespaceoid = classForm->relnamespace;
 			tsentry->owneroid = classForm->relowner;
 			tsentry->totalsize = calculate_total_relation_size_by_oid(relOid);
+			elog(LOG, "table: %d, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
 			update_namespace_map(tsentry->namespaceoid, tsentry->totalsize);
 			update_role_map(tsentry->owneroid, tsentry->totalsize);
 			/* add to pgstat_table_map hash map */
@@ -743,7 +744,7 @@ calculate_table_disk_usage(void)
 			/* if table size is modified*/
 			int64 oldtotalsize = tsentry->totalsize;
 			tsentry->totalsize = calculate_total_relation_size_by_oid(relOid);
-            elog(LOG, "table size: %ld", (int64)tsentry->totalsize);
+            elog(LOG, "table: %d, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
 
 			update_namespace_map(tsentry->namespaceoid, tsentry->totalsize - oldtotalsize);
 			update_role_map(tsentry->owneroid, tsentry->totalsize - oldtotalsize);
