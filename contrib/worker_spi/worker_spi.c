@@ -218,7 +218,7 @@ static void calculate_schema_disk_usage(void);
 static void calculate_role_disk_usage(void);
 static void flush_local_black_map(void);
 static void reset_local_black_map(void);
-static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, int8 diskquota_type);
+static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage);
 //static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
 static void update_namespace_map(Oid namespaceoid, int64 updatesize);
 static void update_role_map(Oid owneroid, int64 updatesize);
