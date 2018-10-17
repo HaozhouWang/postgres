@@ -82,6 +82,7 @@ PG_FUNCTION_INFO_V1(worker_spi_launch);
 
 
 void		_PG_init(void);
+
 void		worker_spi_main(Datum);
 
 /* flags set by signal handlers */
@@ -196,6 +197,8 @@ typedef struct
 	LWLock	   *lock;		/* protects shared memory of blackMap */
 } disk_quota_shared_state;
 static disk_quota_shared_state *shared;
+
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 
 static void init_disk_quota_model(void);
@@ -923,7 +926,10 @@ disk_quota_shmem_startup(void)
 								 &found);
 	if (!found)
 	{
-		shared->lock = &(GetNamedLWLockTranche("pg_quota"))->lock;
+		//shared->lock = &(GetNamedLWLockTranche("disk_quota"))->lock;
+		//TODO this is not correct. should using disk quota lock
+		//need to add them to lwlock.h since named tranche not supported.
+		shared->lock = BackgroundWorkerLock;
 	}
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
@@ -948,7 +954,7 @@ init_disk_quota_shmem(void)
 	 * resources in pgss_shmem_startup().
 	 */
 	RequestAddinShmemSpace(DiskQuotaShmemSize());
-	RequestNamedLWLockTranche("disk_quota", 1);
+	//RequestNamedLWLockTranche("disk_quota", 1);
 
 	/*
 	 * Install startup hook to initialize our shared memory.
