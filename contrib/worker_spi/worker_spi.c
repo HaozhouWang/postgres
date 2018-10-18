@@ -1396,6 +1396,7 @@ _PG_init(void)
 static int
 start_worker(char* dbname)
 {
+	elog("HHHHHH:%s",dbname);
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
