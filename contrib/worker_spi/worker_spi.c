@@ -1172,15 +1172,9 @@ init_disk_quota_model(void)
 void
 disk_quota_worker_spi_main(Datum main_arg)
 {
-	int			index = DatumGetInt32(main_arg);
-	//worktable  *table;
-	//StringInfoData buf;
-	char		name[20];
+	char		*dbname = DatumGetCString(main_arg);
 
-	//table = palloc(sizeof(worktable));
-	sprintf(name, "schema%d", index);
-	//table->schema = pstrdup(name);
-	//table->name = pstrdup("counted");
+	elog(LOG,"connected db:%s",dbname);
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, worker_spi_sighup);
@@ -1190,39 +1184,8 @@ disk_quota_worker_spi_main(Datum main_arg)
 	BackgroundWorkerUnblockSignals();
 
 	/* Connect to our database */
-	BackgroundWorkerInitializeConnection("postgres", NULL);
+	BackgroundWorkerInitializeConnection(dbname, NULL);
 
-	//elog(LOG, "%s initialized with %s.%s",
-	//	 MyBgworkerEntry->bgw_name, table->schema, table->name);
-	//initialize_worker_spi(table);
-
-	/*
-	 * Quote identifiers passed to us.  Note that this must be done after
-	 * initialize_worker_spi, because that routine assumes the names are not
-	 * quoted.
-	 *
-	 * Note some memory might be leaked here.
-	 */
-	/*table->schema = quote_identifier(table->schema);
-	table->name = quote_identifier(table->name);
-
-	initStringInfo(&buf);
-	appendStringInfo(&buf,
-					 "WITH deleted AS (DELETE "
-					 "FROM %s.%s "
-					 "WHERE type = 'delta' RETURNING value), "
-					 "total AS (SELECT coalesce(sum(value), 0) as sum "
-					 "FROM deleted) "
-					 "UPDATE %s.%s "
-					 "SET value = %s.value + total.sum "
-					 "FROM total WHERE type = 'total' "
-					 "RETURNING %s.value",
-					 table->schema, table->name,
-					 table->schema, table->name,
-					 table->name,
-					 table->name);
-
-	*/
 
 	init_disk_quota_model();
 
@@ -1231,7 +1194,6 @@ disk_quota_worker_spi_main(Datum main_arg)
 	 */
 	while (!got_sigterm)
 	{
-		//int			ret;
 		int			rc;
 
 		StartTransactionCommand();
@@ -1267,59 +1229,6 @@ disk_quota_worker_spi_main(Datum main_arg)
 			got_sighup = false;
 			ProcessConfigFile(PGC_SIGHUP);
 		}
-
-		/*
-		 * Start a transaction on which we can run queries.  Note that each
-		 * StartTransactionCommand() call should be preceded by a
-		 * SetCurrentStatementStartTimestamp() call, which sets both the time
-		 * for the statement we're about the run, and also the transaction
-		 * start time.  Also, each other query sent to SPI should probably be
-		 * preceded by SetCurrentStatementStartTimestamp(), so that statement
-		 * start time is always up to date.
-		 *
-		 * The SPI_connect() call lets us run queries through the SPI manager,
-		 * and the PushActiveSnapshot() call creates an "active" snapshot
-		 * which is necessary for queries to have MVCC data to work on.
-		 *
-		 * The pgstat_report_activity() call makes our activity visible
-		 * through the pgstat views.
-		 */
-		//SetCurrentStatementStartTimestamp();
-		//StartTransactionCommand();
-		//SPI_connect();
-		//PushActiveSnapshot(GetTransactionSnapshot());
-		//pgstat_report_activity(STATE_RUNNING, buf.data);
-
-
-		/* We can now execute queries via SPI */
-		/*ret = SPI_execute(buf.data, false, 0);
-
-		if (ret != SPI_OK_UPDATE_RETURNING)
-			elog(FATAL, "cannot select from table %s.%s: error code %d",
-				 table->schema, table->name, ret);
-
-		if (SPI_processed > 0)
-		{
-			bool		isnull;
-			int32		val;
-
-			val = DatumGetInt32(SPI_getbinval(SPI_tuptable->vals[0],
-											  SPI_tuptable->tupdesc,
-											  1, &isnull));
-			if (!isnull)
-				elog(LOG, "%s: count in %s.%s is now %d",
-					 MyBgworkerEntry->bgw_name,
-					 table->schema, table->name, val);
-		}*/
-
-		/*
-		 * And finish our transaction.
-		 */
-		//SPI_finish();
-		//PopActiveSnapshot();
-		//CommitTransactionCommand();
-		//pgstat_report_stat(false);
-		//pgstat_report_activity(STATE_IDLE, NULL);
 	}
 
 	proc_exit(1);
