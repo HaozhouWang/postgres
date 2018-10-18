@@ -8,7 +8,7 @@ RETURNS pg_catalog.int4 STRICT
 AS 'MODULE_PATHNAME'
 LANGUAGE C;
 
-CREATE FUNCTION set_disk_quota_limit(pg_catalog.uint4,pg_catalog.uint4)
+CREATE FUNCTION set_disk_quota_limit(pg_catalog.int4,pg_catalog.int4)
 RETURNS void STRICT
 AS 'MODULE_PATHNAME'
 LANGUAGE C;
