@@ -1345,18 +1345,8 @@ get_database_list(void)
 void
 disk_quota_launcher_spi_main(Datum main_arg)
 {
-	int			index = DatumGetInt32(main_arg);
-	//worktable  *table;
-	//StringInfoData buf;
-	char		name[20];
-
 	List *dblist;
 	ListCell *cell;
-
-	//table = palloc(sizeof(worktable));
-	sprintf(name, "schema%d", index);
-	//table->schema = pstrdup(name);
-	//table->name = pstrdup("counted");
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, worker_spi_sighup);
@@ -1487,16 +1477,9 @@ _PG_init(void)
 	worker.bgw_main = disk_quota_launcher_spi_main;
 	worker.bgw_notify_pid = 0;
 
-	/*
-	 * Now fill in worker-specific data, and do the actual registrations.
-	 */
-	for (i = 1; i <= worker_spi_total_workers; i++)
-	{
-		snprintf(worker.bgw_name, BGW_MAXLEN, "worker %d", i);
-		worker.bgw_main_arg = Int32GetDatum(i);
+	snprintf(worker.bgw_name, BGW_MAXLEN, "disk quota launcher");
 
-		RegisterBackgroundWorker(&worker);
-	}
+	RegisterBackgroundWorker(&worker);
 }
 
 /*
