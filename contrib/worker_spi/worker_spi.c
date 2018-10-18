@@ -1457,7 +1457,7 @@ set_disk_quota_limit(PG_FUNCTION_ARGS)
 	/* We can now execute queries via SPI */
 	ret = SPI_execute(buf.data, false, 0);
 
-	if (ret != SPI_OK_INSERT_RETURNING)
+	if (ret != SPI_OK_INSERT)
 		elog(ERROR, "cannot insert into quota setting table, error code %d", ret);
 
 	/*
