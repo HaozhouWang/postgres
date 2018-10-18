@@ -1026,7 +1026,7 @@ disk_quota_shmem_startup(void)
 		//shared->lock = &(GetNamedLWLockTranche("disk_quota"))->lock;
 		//TODO this is not correct. should using disk quota lock
 		//need to add them to lwlock.h since named tranche not supported.
-		shared->lock = BackgroundWorkerLock;
+		shared->lock = LWLockAssign();
 	}
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
