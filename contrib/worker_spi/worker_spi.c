@@ -65,6 +65,7 @@
 #include "utils/tqual.h"
 #include "utils/builtins.h"
 #include "tcop/utility.h"
+#include "executor/executor.h"
 
 PG_MODULE_MAGIC;
 
@@ -233,6 +234,13 @@ static void load_quotas(void);
 
 static Size DiskQuotaShmemSize(void);
 static void disk_quota_shmem_startup(void);
+
+
+/* enforcement */
+static void init_quota_enforcement(void);
+static bool quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation);
+static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
+static ExecutorCheckPerms_hook_type prev_ExecutorCheckPerms_hook;
 
 /*
  * Signal handler for SIGTERM
@@ -1328,6 +1336,7 @@ _PG_init(void)
 	unsigned int i;
 
 	init_disk_quota_shmem();
+	init_quota_enforcement();
 
 	/* get the configuration */
 	DefineCustomIntVariable("worker_spi.naptime",
@@ -1421,4 +1430,124 @@ worker_spi_launch(PG_FUNCTION_ARGS)
 	Assert(status == BGWH_STARTED);
 
 	PG_RETURN_INT32(pid);
+}
+
+
+
+
+
+
+
+
+
+/* enforcement */
+/*
+ * Initialize enforcement, by installing the executor permission hook.
+ */
+static void
+init_quota_enforcement(void)
+{
+	prev_ExecutorCheckPerms_hook = ExecutorCheckPerms_hook;
+	ExecutorCheckPerms_hook = quota_check_ExecCheckRTPerms;
+}
+
+
+static void
+get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid)
+{
+	HeapTuple	tp;
+
+	tp = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (HeapTupleIsValid(tp))
+	{
+		Form_pg_class reltup = (Form_pg_class) GETSTRUCT(tp);
+		*ownerOid = reltup->relowner;
+		*nsOid = reltup->relnamespace;
+		ReleaseSysCache(tp);
+		return ;
+	}
+	else
+	{
+		elog(DEBUG1, "could not find owner for relation %u", relid);
+		return;
+	}
+}
+
+/*
+ * Permission check hook function. Throws an error if you try to INSERT
+ * (or COPY) into a table, and the quota has been exceeded.
+ */
+static bool
+quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation)
+{
+	ListCell   *l;
+
+	foreach(l, rangeTable)
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(l);
+		Oid ownerOid = InvalidOid;
+		Oid nsOid = InvalidOid;
+		Oid reloid = InvalidOid;
+		bool found;
+
+		/* see ExecCheckRTEPerms() */
+		if (rte->rtekind != RTE_RELATION)
+			continue;
+
+		/*
+		 * Only check quota on inserts. UPDATEs may well increase
+		 * space usage too, but we ignore that for now.
+		 */
+		if ((rte->requiredPerms & ACL_INSERT) == 0 && (rte->requiredPerms & ACL_UPDATE) == 0)
+			continue;
+
+		/* Perform the check as the relation's owner and namespace */
+
+		reloid = rte->relid;
+		get_rel_owner_schema(reloid, &ownerOid, &nsOid);
+
+		LWLockAcquire(shared->lock, LW_SHARED);
+		hash_search(disk_quota_black_map,
+					&reloid,
+					HASH_FIND, &found);
+		if (found)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_DISK_FULL),
+					 errmsg("table's disk space quota exceeded")));
+			return false;
+		}
+
+		if ( nsOid != InvalidOid)
+		{
+			hash_search(disk_quota_black_map,
+					&nsOid,
+					HASH_FIND, &found);
+			if (found)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_DISK_FULL),
+						 errmsg("schema's disk space quota exceeded")));
+				return false;
+			}
+
+		}
+
+		if ( ownerOid != InvalidOid)
+		{
+			hash_search(disk_quota_black_map,
+					&ownerOid,
+					HASH_FIND, &found);
+			if (found)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_DISK_FULL),
+						 errmsg("role's disk space quota exceeded")));
+				return false;
+			}
+		}
+		LWLockRelease(shared->lock);
+	}
+
+	return true;
 }
