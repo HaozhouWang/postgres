@@ -1449,10 +1449,10 @@ set_disk_quota_limit(PG_FUNCTION_ARGS)
 					"insert into quota.config values(%u,%u);",
 					target_oid,quota_limit);
 
-	SetCurrentStatementStartTimestamp();
-	StartTransactionCommand();
+	//SetCurrentStatementStartTimestamp();
+	//StartTransactionCommand();
 	SPI_connect();
-	PushActiveSnapshot(GetTransactionSnapshot());
+	//PushActiveSnapshot(GetTransactionSnapshot());
 
 	/* We can now execute queries via SPI */
 	ret = SPI_execute(buf.data, false, 0);
@@ -1464,8 +1464,8 @@ set_disk_quota_limit(PG_FUNCTION_ARGS)
 	 * And finish our transaction.
 	 */
 	SPI_finish();
-	PopActiveSnapshot();
-	CommitTransactionCommand();
+	//PopActiveSnapshot();
+	//CommitTransactionCommand();
 
 	PG_RETURN_VOID();
 }
