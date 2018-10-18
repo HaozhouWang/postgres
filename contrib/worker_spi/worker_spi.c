@@ -90,6 +90,8 @@ void		worker_spi_main(Datum);
 void		disk_quota_worker_spi_main(Datum);
 void		disk_quota_launcher_spi_main(Datum);
 
+static char monitor_database_name[1024];
+
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
 static volatile sig_atomic_t got_sigterm = false;
@@ -1396,7 +1398,7 @@ _PG_init(void)
 static int
 start_worker(char* dbname)
 {
-	elog(LOG,"HHHHHH:%s",dbname);
+	//elog(LOG,"HHHHHH:%s",dbname);
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
@@ -1410,7 +1412,8 @@ start_worker(char* dbname)
 	sprintf(worker.bgw_library_name, "worker_spi");
 	sprintf(worker.bgw_function_name, "disk_quota_worker_spi_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN, "disk quota worker monitoring db: %s", dbname);
-	worker.bgw_main_arg = CStringGetDatum(dbname);
+	strcpy(monitor_database_name,dbname);
+	worker.bgw_main_arg = CStringGetDatum(monitor_database_name);
 	/* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
 	worker.bgw_notify_pid = MyProcPid;
 
