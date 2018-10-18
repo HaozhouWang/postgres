@@ -88,6 +88,7 @@ void		_PG_init(void);
 
 void		worker_spi_main(Datum);
 void		disk_quota_worker_spi_main(Datum);
+void		disk_quota_launcher_spi_main(Datum);
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
@@ -1481,7 +1482,7 @@ _PG_init(void)
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = disk_quota_worker_spi_main;
+	worker.bgw_main = disk_quota_launcher_spi_main;
 	worker.bgw_notify_pid = 0;
 
 	/*
