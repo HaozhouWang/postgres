@@ -1174,8 +1174,8 @@ init_disk_quota_model(void)
 void
 disk_quota_worker_spi_main(Datum main_arg)
 {
-	char		*dbname = DatumGetCString(main_arg);
-
+	//char		*dbname = DatumGetCString(main_arg);
+	char *dbname=MyBgworkerEntry->bgw_name;
 	elog(LOG,"connected db:%s",dbname);
 
 	/* Establish signal handlers before unblocking signals. */
@@ -1411,8 +1411,9 @@ start_worker(char* dbname)
 	worker.bgw_main = NULL;		/* new worker might not have library loaded */
 	sprintf(worker.bgw_library_name, "worker_spi");
 	sprintf(worker.bgw_function_name, "disk_quota_worker_spi_main");
-	snprintf(worker.bgw_name, BGW_MAXLEN, "disk quota worker monitoring db: %s", dbname);
+	snprintf(worker.bgw_name, BGW_MAXLEN, "%s", dbname);
 	strcpy(monitor_database_name,dbname);
+	char monitor_database_name[]="ddd";
 	worker.bgw_main_arg = CStringGetDatum(monitor_database_name);
 	/* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
 	worker.bgw_notify_pid = MyProcPid;
