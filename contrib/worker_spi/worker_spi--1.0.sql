@@ -8,6 +8,11 @@ RETURNS pg_catalog.int4 STRICT
 AS 'MODULE_PATHNAME'
 LANGUAGE C;
 
+CREATE FUNCTION set_disk_quota_limit(pg_catalog.uint4,pg_catalog.uint4)
+RETURNS void STRICT
+AS 'MODULE_PATHNAME'
+LANGUAGE C;
+
 CREATE SCHEMA quota;
 
 set search_path='quota';

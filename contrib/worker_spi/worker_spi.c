@@ -71,6 +71,8 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(worker_spi_launch);
 
+PG_FUNCTION_INFO_V1(set_disk_quota_limit);
+
 
 /* cluster level max size of black list */
 #define MAX_DISK_QUOTA_BLACK_ENTRIES 8192 * 1024
@@ -1169,14 +1171,11 @@ init_disk_quota_model(void)
 	}
 }
 
-
-
 void
 disk_quota_worker_spi_main(Datum main_arg)
 {
-	//char		*dbname = DatumGetCString(main_arg);
 	char *dbname=MyBgworkerEntry->bgw_name;
-	elog(LOG,"connected db:%s",dbname);
+	elog(LOG,"start disk quota worker process to monitor database:%s", dbname);
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, worker_spi_sighup);
@@ -1238,7 +1237,7 @@ disk_quota_worker_spi_main(Datum main_arg)
 
 
 /*
- * database list found in guc
+ * database list found in guc monitored_database_list
  */
 static List *
 get_database_list(void)
@@ -1440,6 +1439,43 @@ start_worker(char* dbname)
 
 
 /*
+ * Set disk quota limit for schema or role.
+ */
+Datum
+set_disk_quota_limit(PG_FUNCTION_ARGS)
+{
+	int ret;
+	StringInfoData buf;
+
+	Oid		target_oid = PG_GETARG_UINT32(0);
+	uint32	quota_limit = PG_GETARG_UINT32(1);
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+					"insert into quota.config values(%u,%u);",
+					target_oid,quota_limit);
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	/* We can now execute queries via SPI */
+	ret = SPI_execute(buf.data, false, 0);
+
+	if (ret != SPI_OK_INSERT_RETURNING)
+		elog(ERROR, "cannot insert into quota setting table, error code %d", ret);
+
+	/*
+	 * And finish our transaction.
+	 */
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+
+	PG_RETURN_VOID();
+}
+/*
  * Dynamically launch an SPI worker.
  */
 Datum
@@ -1482,13 +1518,6 @@ worker_spi_launch(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT32(pid);
 }
-
-
-
-
-
-
-
 
 
 /* enforcement */
