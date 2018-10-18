@@ -1383,6 +1383,8 @@ disk_quota_launcher_spi_main(Datum main_arg)
 		}
 		elog(LOG,"to delete start worker db name:%s", db_name);
 		start_worker(db_name);
+
+		//TODO add management for started worker.
 	}
 	/*
 	 * Main loop: do this until the SIGTERM handler tells us to terminate
@@ -1521,7 +1523,7 @@ start_worker(char* dbname)
 	worker.bgw_notify_pid = MyProcPid;
 
 	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
-		PG_RETURN_NULL();
+		return -1;
 
 	status = WaitForBackgroundWorkerStartup(handle, &pid);
 
