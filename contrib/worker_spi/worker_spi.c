@@ -1350,6 +1350,9 @@ disk_quota_launcher_spi_main(Datum main_arg)
 	//StringInfoData buf;
 	char		name[20];
 
+	List *dblist;
+	ListCell *cell;
+
 	//table = palloc(sizeof(worktable));
 	sprintf(name, "schema%d", index);
 	//table->schema = pstrdup(name);
@@ -1365,15 +1368,12 @@ disk_quota_launcher_spi_main(Datum main_arg)
 	/* Connect to our database */
 	BackgroundWorkerInitializeConnection("postgres", NULL);
 
-	List *dblist;
-	ListCell *cell;
 
 	dblist = get_database_list();
 
 	foreach(cell, dblist)
 	{
 		char *db_name;
-		Oid db_oid = InvalidOid;
 
 		db_name = (char *)lfirst(cell);
 		if (db_name == NULL || *db_name == '\0')
@@ -1503,7 +1503,6 @@ _PG_init(void)
 static int
 start_worker(char* dbname)
 {
-	int32		i = PG_GETARG_INT32(0);
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
@@ -1516,7 +1515,7 @@ start_worker(char* dbname)
 	worker.bgw_main = NULL;		/* new worker might not have library loaded */
 	sprintf(worker.bgw_library_name, "worker_spi");
 	sprintf(worker.bgw_function_name, "disk_quota_worker_spi_main");
-	snprintf(worker.bgw_name, BGW_MAXLEN, "disk quota worker %d", i);
+	snprintf(worker.bgw_name, BGW_MAXLEN, "disk quota worker monitoring db: %s", dbname);
 	worker.bgw_main_arg = CStringGetDatum(dbname);
 	/* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
 	worker.bgw_notify_pid = MyProcPid;
