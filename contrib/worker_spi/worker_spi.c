@@ -96,6 +96,7 @@ static volatile sig_atomic_t got_sigterm = false;
 /* GUC variables */
 static int	worker_spi_naptime = 10;
 static int	worker_spi_total_workers = 2;
+static char *worker_spi_monitored_database_list = NULL;
 
 
 typedef struct worktable
@@ -234,7 +235,9 @@ static void load_quotas(void);
 
 static Size DiskQuotaShmemSize(void);
 static void disk_quota_shmem_startup(void);
+static int start_worker(char* dbname);
 
+static List *get_database_list(void);
 
 /* enforcement */
 static void init_quota_enforcement(void);
@@ -1322,6 +1325,101 @@ disk_quota_worker_spi_main(Datum main_arg)
 }
 
 
+/*
+ * database list found in guc
+ */
+static List *
+get_database_list(void)
+{
+	List	   *dblist = NULL;
+	if (!SplitIdentifierString(worker_spi_monitored_database_list, ',', &dblist))
+	{
+		elog(FATAL, "cann't get database list from guc:'%s'", worker_spi_monitored_database_list);
+		return NULL;
+	}
+	return dblist;
+}
+
+
+void
+disk_quota_launcher_spi_main(Datum main_arg)
+{
+	int			index = DatumGetInt32(main_arg);
+	//worktable  *table;
+	//StringInfoData buf;
+	char		name[20];
+
+	//table = palloc(sizeof(worktable));
+	sprintf(name, "schema%d", index);
+	//table->schema = pstrdup(name);
+	//table->name = pstrdup("counted");
+
+	/* Establish signal handlers before unblocking signals. */
+	pqsignal(SIGHUP, worker_spi_sighup);
+	pqsignal(SIGTERM, worker_spi_sigterm);
+
+	/* We're now ready to receive signals */
+	BackgroundWorkerUnblockSignals();
+
+	/* Connect to our database */
+	BackgroundWorkerInitializeConnection("postgres", NULL);
+
+	List *dblist;
+	ListCell *cell;
+
+	dblist = get_database_list();
+
+	foreach(cell, dblist)
+	{
+		char *db_name;
+		Oid db_oid = InvalidOid;
+
+		db_name = (char *)lfirst(cell);
+		if (db_name == NULL || *db_name == '\0')
+		{
+			elog(WARNING, "invalid db name='%s'", db_name);
+			continue;
+		}
+		elog(LOG,"to delete start worker db name:%s", db_name);
+		start_worker(db_name);
+	}
+	/*
+	 * Main loop: do this until the SIGTERM handler tells us to terminate
+	 */
+	while (!got_sigterm)
+	{
+		int			rc;
+
+		/*
+		 * Background workers mustn't call usleep() or any direct equivalent:
+		 * instead, they may wait on their process latch, which sleeps as
+		 * necessary, but is awakened if postmaster dies.  That way the
+		 * background process goes away immediately in an emergency.
+		 */
+		rc = WaitLatch(&MyProc->procLatch,
+					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+					   worker_spi_naptime * 1000L);
+		ResetLatch(&MyProc->procLatch);
+
+		/* emergency bailout if postmaster has died */
+		if (rc & WL_POSTMASTER_DEATH)
+			proc_exit(1);
+
+		/*
+		 * In case of a SIGHUP, just reload the configuration.
+		 */
+		if (got_sighup)
+		{
+			got_sighup = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+
+	}
+
+	proc_exit(1);
+}
+
+
 
 /*
  * Entrypoint of this module.
@@ -1368,6 +1466,16 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomStringVariable("worker_spi.monitor_databases",
+								gettext_noop("database list with disk quota monitored."),
+								NULL,
+								&worker_spi_monitored_database_list,
+								"postgres",
+								PGC_POSTMASTER, GUC_LIST_INPUT,
+								NULL,
+								NULL,
+								NULL);
+
 	/* set up common data for all our workers */
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -1387,6 +1495,51 @@ _PG_init(void)
 		RegisterBackgroundWorker(&worker);
 	}
 }
+
+/*
+ * Dynamically launch an SPI worker.
+ */
+static int
+start_worker(char* dbname)
+{
+	int32		i = PG_GETARG_INT32(0);
+	BackgroundWorker worker;
+	BackgroundWorkerHandle *handle;
+	BgwHandleStatus status;
+	pid_t		pid;
+
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+		BGWORKER_BACKEND_DATABASE_CONNECTION;
+	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	worker.bgw_main = NULL;		/* new worker might not have library loaded */
+	sprintf(worker.bgw_library_name, "worker_spi");
+	sprintf(worker.bgw_function_name, "disk_quota_worker_spi_main");
+	snprintf(worker.bgw_name, BGW_MAXLEN, "disk quota worker %d", i);
+	worker.bgw_main_arg = CStringGetDatum(dbname);
+	/* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
+	worker.bgw_notify_pid = MyProcPid;
+
+	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+		PG_RETURN_NULL();
+
+	status = WaitForBackgroundWorkerStartup(handle, &pid);
+
+	if (status == BGWH_STOPPED)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+				 errmsg("could not start background process"),
+			   errhint("More details may be available in the server log.")));
+	if (status == BGWH_POSTMASTER_DIED)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+			  errmsg("cannot start background processes without postmaster"),
+				 errhint("Kill all remaining database processes and restart the database.")));
+	Assert(status == BGWH_STARTED);
+
+	return pid;
+}
+
 
 /*
  * Dynamically launch an SPI worker.
@@ -1505,7 +1658,7 @@ quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation)
 
 		reloid = rte->relid;
 		get_rel_owner_schema(reloid, &ownerOid, &nsOid);
-		elog(LOG,"hubert insert or update table%u owner%u ns%u",reloid,ownerOid,nsOid);
+		elog(LOG,"TO delete: hubert insert or update table%u owner%u ns%u",reloid,ownerOid,nsOid);
 		LWLockAcquire(shared->lock, LW_SHARED);
 		hash_search(disk_quota_black_map,
 					&reloid,
