@@ -1424,7 +1424,6 @@ void
 _PG_init(void)
 {
 	BackgroundWorker worker;
-	unsigned int i;
 
 	init_disk_quota_shmem();
 	init_quota_enforcement();
