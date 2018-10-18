@@ -1505,7 +1505,7 @@ quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation)
 
 		reloid = rte->relid;
 		get_rel_owner_schema(reloid, &ownerOid, &nsOid);
-
+		elog(LOG,"hubert insert or update table%u owner%u ns%u",reloid,ownerOid,nsOid);
 		LWLockAcquire(shared->lock, LW_SHARED);
 		hash_search(disk_quota_black_map,
 					&reloid,
