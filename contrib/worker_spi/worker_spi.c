@@ -1062,7 +1062,7 @@ init_shm_worker_active_tables()
 	memset(&ctl, 0, sizeof(ctl));
 	
 
-	ctl.keysize = sizeof(Oid);
+	ctl.keysize = sizeof(ActiveTableEntry);
 	ctl.entrysize = sizeof(ActiveTableEntry);
 
 	elog(LOG, "max tables = %d\n", worker_spi_max_active_tables);

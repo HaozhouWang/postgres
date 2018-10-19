@@ -341,6 +341,7 @@ end_heap_rewrite(RewriteState state)
 
 		PageSetChecksumInplace(state->rs_buffer, state->rs_blockno);
 
+		DQ_REPORT_ACTIVE_RELATION(RelationGetRelid(state->rs_new_rel));
 		smgrextend(state->rs_new_rel->rd_smgr, MAIN_FORKNUM, state->rs_blockno,
 				   (char *) state->rs_buffer, true);
 	}
@@ -713,6 +714,7 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 
 			PageSetChecksumInplace(page, state->rs_blockno);
 
+			DQ_REPORT_ACTIVE_RELATION(RelationGetRelid(state->rs_new_rel));
 			smgrextend(state->rs_new_rel->rd_smgr, MAIN_FORKNUM,
 					   state->rs_blockno, (char *) page, true);
 

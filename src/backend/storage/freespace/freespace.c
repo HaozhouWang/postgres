@@ -622,6 +622,7 @@ fsm_extend(Relation rel, BlockNumber fsm_nblocks)
 	{
 		PageSetChecksumInplace((Page) pg.data, fsm_nblocks_now);
 
+		DQ_REPORT_ACTIVE_RELATION(RelationGetRelid(rel));
 		smgrextend(rel->rd_smgr, FSM_FORKNUM, fsm_nblocks_now,
 				   pg.data, false);
 		fsm_nblocks_now++;

@@ -724,6 +724,7 @@ _hash_alloc_buckets(Relation rel, BlockNumber firstblock, uint32 nblocks)
 	MemSet(zerobuf.data, 0, sizeof(zerobuf));
 
 	RelationOpenSmgr(rel);
+	DQ_REPORT_ACTIVE_RELATION(RelationGetRelid(rel));
 	smgrextend(rel->rd_smgr, MAIN_FORKNUM, lastblock, zerobuf.data, false);
 
 	return true;

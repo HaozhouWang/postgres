@@ -289,6 +289,7 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 		if (!wstate->btws_zeropage)
 			wstate->btws_zeropage = (Page) palloc0(BLCKSZ);
 		/* don't set checksum for all-zero page */
+		DQ_REPORT_ACTIVE_RELATION(RelationGetRelid(wstate->index));
 		smgrextend(wstate->index->rd_smgr, MAIN_FORKNUM,
 				   wstate->btws_pages_written++,
 				   (char *) wstate->btws_zeropage,
@@ -304,6 +305,7 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 	if (blkno == wstate->btws_pages_written)
 	{
 		/* extending the file... */
+		DQ_REPORT_ACTIVE_RELATION(RelationGetRelid(wstate->index));
 		smgrextend(wstate->index->rd_smgr, MAIN_FORKNUM, blkno,
 				   (char *) page, true);
 		wstate->btws_pages_written++;

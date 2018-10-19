@@ -87,6 +87,7 @@ static void smgrshutdown(int code, Datum arg);
 static void add_to_unowned_list(SMgrRelation reln);
 static void remove_from_unowned_list(SMgrRelation reln);
 
+dq_report_hook_type dq_report_hook;
 
 /*
  *	smgrinit(), smgrshutdown() -- Initialize or shut down storage

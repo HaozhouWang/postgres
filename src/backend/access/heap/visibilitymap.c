@@ -645,6 +645,7 @@ vm_extend(Relation rel, BlockNumber vm_nblocks)
 	{
 		PageSetChecksumInplace((Page) pg.data, vm_nblocks_now);
 
+		DQ_REPORT_ACTIVE_RELATION(RelationGetRelid(rel));
 		smgrextend(rel->rd_smgr, VISIBILITYMAP_FORKNUM, vm_nblocks_now,
 				   pg.data, false);
 		vm_nblocks_now++;

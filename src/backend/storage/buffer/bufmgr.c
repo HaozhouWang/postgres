@@ -256,6 +256,7 @@ ReadBufferExtended(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 	 * miss.
 	 */
 	pgstat_count_buffer_read(reln);
+	DQ_REPORT_ACTIVE_RELATION_COND(blockNum==P_NEW, RelationGetRelid(reln));
 	buf = ReadBuffer_common(reln->rd_smgr, reln->rd_rel->relpersistence,
 							forkNum, blockNum, mode, strategy, &hit);
 	if (hit)
