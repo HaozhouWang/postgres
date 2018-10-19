@@ -97,6 +97,8 @@ static volatile sig_atomic_t got_sigterm = false;
 static int	worker_spi_naptime = 10;
 static int	worker_spi_total_workers = 2;
 static char *worker_spi_monitored_database_list = NULL;
+/* max number of active tables monitored by disk-quota */
+static int worker_spi_max_active_tables;
 
 
 typedef struct worktable
@@ -154,6 +156,13 @@ struct BlackMapEntry
 	Oid			databaseoid;
 };
 
+// active table entry in shm, one HTAB per segment
+struct ActiveTableEntry
+{
+	Oid	reloid;
+};
+typedef struct ActiveTableEntry ActiveTableEntry;
+
 /* local blacklist for which exceed their quota limit */
 struct LocalBlackMapEntry
 {
@@ -166,6 +175,7 @@ struct LocalBlackMapEntry
  */
 static HTAB *pgstat_table_map = NULL;
 static HTAB *pgstat_active_table_map = NULL;
+static HTAB *active_tables_map = NULL;
 
 /* Cache to detect the active table list */
 typedef struct DiskQuotaLocalTableCache
@@ -215,6 +225,7 @@ static disk_quota_shared_state *shared;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 static void init_disk_quota_shmem(void);
+static void init_shm_worker_active_tables(void);
 static void init_disk_quota_model(void);
 static void refresh_disk_quota_model(void);
 static void calculate_table_disk_usage(void);
@@ -299,6 +310,19 @@ _PG_init(void)
 								NULL,
 								NULL,
 								NULL);
+
+	DefineCustomIntVariable("worker_spi.max_active_tables",
+							"max number of active tables monitored by disk-quota",
+							NULL,
+							&worker_spi_max_active_tables,
+							8 * 1024,
+							1,
+							INT_MAX,
+							PGC_SIGHUP,
+							0,
+							NULL,
+							NULL,
+							NULL);
 
 	/* set up common data for all our workers */
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
@@ -725,7 +749,7 @@ static void calculate_role_disk_usage(void)
 static bool check_table_is_active(Oid reloid)
 {
 	bool found = false;
-	hash_search(pgstat_active_table_map, &reloid, HASH_REMOVE, &found);
+	hash_search(active_tables_map, &reloid, HASH_REMOVE, &found);
 	if (found)
 	{
 		elog(DEBUG1,"table is active with oid:%u", reloid);
@@ -869,6 +893,7 @@ DiskQuotaShmemSize(void)
 
 	size = MAXALIGN(sizeof(disk_quota_shared_state));
 	size = add_size(size, hash_estimate_size(MAX_DISK_QUOTA_BLACK_ENTRIES, sizeof(BlackMapEntry)));
+	size = add_size(size, hash_estimate_size(worker_spi_max_active_tables, sizeof(ActiveTableEntry)));
 	return size;
 }
 
@@ -911,6 +936,8 @@ disk_quota_shmem_startup(void)
 									MAX_DISK_QUOTA_BLACK_ENTRIES,
 									&hash_ctl,
 									HASH_DIRSIZE | HASH_SHARED_MEM | HASH_ALLOC | HASH_ELEM);
+
+	init_shm_worker_active_tables();
 
 	LWLockRelease(AddinShmemInitLock);
 }
@@ -1026,6 +1053,26 @@ init_disk_quota_model(void)
 									&ctl,
 									HASH_ELEM);
 	}
+}
+
+static void
+init_shm_worker_active_tables()
+{
+	HASHCTL ctl;
+	memset(&ctl, 0, sizeof(ctl));
+	
+
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(ActiveTableEntry);
+
+	elog(LOG, "max tables = %d\n", worker_spi_max_active_tables);
+
+	active_tables_map = ShmemInitHash ("active_tables",
+				worker_spi_max_active_tables,
+				worker_spi_max_active_tables,
+				&ctl,
+				HASH_ELEM);
+ 
 }
 
 void
@@ -1178,7 +1225,6 @@ disk_quota_launcher_spi_main(Datum main_arg)
 
 	proc_exit(1);
 }
-
 
 
 
