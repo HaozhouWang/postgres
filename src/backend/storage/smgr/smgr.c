@@ -395,6 +395,8 @@ smgrcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 							isRedo);
 
 	(*(smgrsw[reln->smgr_which].smgr_create)) (reln, forknum, isRedo);
+
+	DQ_REPORT_ACTIVE_RELATION(reln);
 }
 
 /*
@@ -601,6 +603,8 @@ smgrextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 {
 	(*(smgrsw[reln->smgr_which].smgr_extend)) (reln, forknum, blocknum,
 											   buffer, skipFsync);
+
+	DQ_REPORT_ACTIVE_RELATION(reln);
 }
 
 /*
@@ -691,6 +695,8 @@ smgrtruncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 	 * Do the truncation.
 	 */
 	(*(smgrsw[reln->smgr_which].smgr_truncate)) (reln, forknum, nblocks);
+
+	DQ_REPORT_ACTIVE_RELATION(reln);
 }
 
 /*
