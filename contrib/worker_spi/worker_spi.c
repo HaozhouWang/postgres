@@ -118,6 +118,14 @@ typedef struct RoleSizeEntry RoleSizeEntry;
 typedef struct QuotaLimitEntry QuotaLimitEntry;
 typedef struct BlackMapEntry BlackMapEntry;
 typedef struct LocalBlackMapEntry LocalBlackMapEntry;
+typedef struct DiskQuotaWorkerEntry DiskQuotaWorkerEntry;
+
+/* disk quota worker info used by launcher to manage the worker processes. */
+struct DiskQuotaWorkerEntry
+{
+	char dbname[NAMEDATALEN];
+	BackgroundWorkerHandle *handle;
+};
 
 /* local cache of table disk size and corresponding schema and owner */
 struct TableSizeEntry
@@ -176,6 +184,7 @@ struct LocalBlackMapEntry
 static HTAB *pgstat_table_map = NULL;
 static HTAB *pgstat_active_table_map = NULL;
 static HTAB *active_tables_map = NULL;
+static HTAB *disk_quota_worker_map = NULL;
 
 /* Cache to detect the active table list */
 typedef struct DiskQuotaLocalTableCache
@@ -244,11 +253,13 @@ static void build_active_table_map(void);
 static int64 calculate_total_relation_size_by_oid(Oid reloid);
 static void load_quotas(void);
 
+
 static Size DiskQuotaShmemSize(void);
 static void disk_quota_shmem_startup(void);
 static int start_worker(char* dbname);
 
 static List *get_database_list(void);
+static void refresh_wokrer_list(void);
 
 /* enforcement */
 static void init_quota_enforcement(void);
@@ -306,7 +317,7 @@ _PG_init(void)
 								NULL,
 								&worker_spi_monitored_database_list,
 								"postgres",
-								PGC_POSTMASTER, GUC_LIST_INPUT,
+								PGC_SIGHUP, GUC_LIST_INPUT,
 								NULL,
 								NULL,
 								NULL);
@@ -1155,12 +1166,98 @@ get_database_list(void)
 	return dblist;
 }
 
+static void
+refresh_wokrer_list(void)
+{
+	List *monitor_dblist;
+	List *removed_workerlist;
+	ListCell *cell;
+	ListCell *removed_workercell;
+	bool flag = false;
+	bool found;
+	DiskQuotaWorkerEntry *hash_entry;
+	HASH_SEQ_STATUS status;
+
+	removed_workerlist = NIL;
+	monitor_dblist = get_database_list();
+	/*
+	 * refresh the worker process based on the config change.
+	 * step 1 is to terminate the worker not in monitor dblist.
+	 */
+	elog(LOG,"BEGIN to refresh monitor database list.");
+	hash_seq_init(&status, disk_quota_worker_map);
+
+	while ((hash_entry = (DiskQuotaWorkerEntry*) hash_seq_search(&status)) != NULL)
+	{
+		flag = false;
+		foreach(cell, monitor_dblist)
+		{
+			char *db_name;
+
+			db_name = (char *)lfirst(cell);
+			if (db_name == NULL || *db_name == '\0')
+			{
+				continue;
+			}
+			 elog(LOG,"BEGIN to refresh monitor database list. curdb: %s:%s",db_name,hash_entry->dbname) ;
+			if (strcmp(db_name, hash_entry->dbname) == 0 )
+			{
+				flag = true;
+				break;
+			}
+		}
+		if (!flag)
+		{
+			elog(LOG,"BEGIN to refresh monitor database list. removedb: %s", hash_entry->dbname);
+			removed_workerlist = lappend(removed_workerlist, hash_entry->dbname);
+		}
+	}
+	foreach(removed_workercell, removed_workerlist)
+	{
+		DiskQuotaWorkerEntry* workerentry;
+		char *db_name;
+		BackgroundWorkerHandle *handle;
+
+		db_name = (char *)lfirst(removed_workercell);
+
+		workerentry = (DiskQuotaWorkerEntry *)hash_search(disk_quota_worker_map,
+					(void *)db_name,
+					HASH_REMOVE, &found);
+		if(found)
+		{
+			handle = workerentry->handle;
+			TerminateBackgroundWorker(handle);
+		}
+	}
+
+	/* step 2: start new worker which appears in monitor dblist. */
+	foreach(cell, monitor_dblist)
+	{
+		char *db_name;
+
+		db_name = (char *)lfirst(cell);
+		if (db_name == NULL || *db_name == '\0')
+		{
+			continue;
+		}
+		hash_search(disk_quota_worker_map,
+							(void *)db_name,
+							HASH_FIND, &found);
+		if(!found)
+		{
+			start_worker(db_name);
+		}
+	}
+}
+
 
 void
 disk_quota_launcher_spi_main(Datum main_arg)
 {
 	List *dblist;
 	ListCell *cell;
+	HASHCTL		hash_ctl;
+
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, worker_spi_sighup);
@@ -1172,6 +1269,14 @@ disk_quota_launcher_spi_main(Datum main_arg)
 	/* Connect to our database */
 	BackgroundWorkerInitializeConnection("postgres", NULL);
 
+	memset(&hash_ctl, 0, sizeof(hash_ctl));
+	hash_ctl.keysize = NAMEDATALEN;
+	hash_ctl.entrysize = sizeof(DiskQuotaWorkerEntry);
+
+	disk_quota_worker_map = hash_create("disk quota worker map",
+										  1024,
+										  &hash_ctl,
+										  HASH_ELEM);
 
 	dblist = get_database_list();
 
@@ -1185,10 +1290,7 @@ disk_quota_launcher_spi_main(Datum main_arg)
 			elog(WARNING, "invalid db name='%s'", db_name);
 			continue;
 		}
-		elog(LOG,"to delete start worker db name:%s", db_name);
 		start_worker(db_name);
-
-		//TODO add management for started worker.
 	}
 	/*
 	 * Main loop: do this until the SIGTERM handler tells us to terminate
@@ -1219,6 +1321,8 @@ disk_quota_launcher_spi_main(Datum main_arg)
 		{
 			got_sighup = false;
 			ProcessConfigFile(PGC_SIGHUP);
+			/* terminate not monitored worker process and start new worker process*/
+			refresh_wokrer_list();
 		}
 
 	}
@@ -1238,6 +1342,8 @@ start_worker(char* dbname)
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
 	pid_t		pid;
+	bool found;
+	DiskQuotaWorkerEntry* workerentry;
 
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -1266,6 +1372,15 @@ start_worker(char* dbname)
 			  errmsg("cannot start background processes without postmaster"),
 				 errhint("Kill all remaining database processes and restart the database.")));
 	Assert(status == BGWH_STARTED);
+
+	/* put the worker handle into the worker map */
+	workerentry = (DiskQuotaWorkerEntry *)hash_search(disk_quota_worker_map,
+				(void *)dbname,
+				HASH_ENTER, &found);
+	if (!found)
+	{
+		workerentry->handle = handle;
+	}
 
 	return pid;
 }
