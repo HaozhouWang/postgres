@@ -71,7 +71,6 @@
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(set_schema_quota_limit);
-PG_FUNCTION_INFO_V1(show_schema_quota_limit);
 
 
 /* cluster level max size of black list */
@@ -848,7 +847,7 @@ load_quotas(void)
 	RangeVar   *rv;
 	Relation	rel;
 
-	rv = makeRangeVar("quota", "config", -1);
+	rv = makeRangeVar("diskquota", "quota_config", -1);
 	rel = heap_openrv_extended(rv, AccessShareLock, true);
 	if (!rel)
 	{
@@ -860,7 +859,7 @@ load_quotas(void)
 	}
 	heap_close(rel, NoLock);
 
-	ret = SPI_execute("select targetOid, quotalimitMB from quota.config", true, 0);
+	ret = SPI_execute("select targetOid, quotalimitMB from diskquota.quota_config", true, 0);
 	if (ret != SPI_OK_SELECT)
 		elog(FATAL, "SPI_execute failed: error code %d", ret);
 
@@ -1417,7 +1416,7 @@ set_schema_quota_limit(PG_FUNCTION_ARGS)
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
-					"insert into quota.config values(%u,%ld);",
+					"insert into diskquota.quota_config values(%u,%ld);",
 					namespaceId,quota_limit_mb);
 
 	SPI_connect();
@@ -1435,25 +1434,6 @@ set_schema_quota_limit(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
-
-
-/*
- * Set disk quota limit for schema or role.
- */
-Datum
-show_schema_quota_limit(PG_FUNCTION_ARGS)
-{
-	int ret;
-	StringInfoData buf;
-	char *nspname;
-
-	nspname = (char *)PG_GETARG_CSTRING(0);
-
-	PG_RETURN_VOID();
-}
-
-
-
 
 /* enforcement */
 /*

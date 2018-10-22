@@ -10,14 +10,14 @@ set search_path='diskquota';
 -- Configuration table
 create table diskquota.quota_config (targetOid oid PRIMARY key, quotalimitMB int8);
 
-SELECT pg_catalog.pg_extension_config_dump('quota.config', '');
+SELECT pg_catalog.pg_extension_config_dump('diskquota.quota_config', '');
 
-CREATE FUNCTION set_schema_quota_limit(text,int8)
+CREATE FUNCTION set_schema_quota_limit(cstring,int8)
 RETURNS void STRICT
 AS 'MODULE_PATHNAME'
 LANGUAGE C;
 
-CREATE FUNCTION show_schema_quota_limit(text)
+CREATE FUNCTION set_role_quota_limit(cstring,int8)
 RETURNS void STRICT
 AS 'MODULE_PATHNAME'
 LANGUAGE C;
