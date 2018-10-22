@@ -38,6 +38,7 @@
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
+#include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lwlock.h"
@@ -69,7 +70,8 @@
 
 PG_MODULE_MAGIC;
 
-PG_FUNCTION_INFO_V1(set_disk_quota_limit);
+PG_FUNCTION_INFO_V1(set_schema_quota_limit);
+PG_FUNCTION_INFO_V1(show_schema_quota_limit);
 
 
 /* cluster level max size of black list */
@@ -161,7 +163,7 @@ struct QuotaLimitEntry
 struct BlackMapEntry
 {
 	Oid 		targetoid;
-	Oid			databaseoid;
+	Oid		databaseoid;
 };
 
 // active table entry in shm, one HTAB per segment
@@ -266,7 +268,10 @@ static void init_quota_enforcement(void);
 static bool quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation);
 static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
 static ExecutorCheckPerms_hook_type prev_ExecutorCheckPerms_hook;
+static BufferExtendCheckPerms_hook_type prev_BufferExtendCheckPerms_hook;
 
+static bool quota_check_ReadBufferExtendCheckPerms(Oid reloid, BlockNumber blockNum);
+static bool quota_check_common(Oid reloid);
 
 /*
  * Entrypoint of this module.
@@ -413,7 +418,7 @@ flush_local_black_map(void)
 				/* new db objects which exceed quota limit */
 				if (!found)
 				{
-					blackentry->targetoid = blackentry->targetoid;
+					blackentry->targetoid = localblackentry->targetoid;
 					blackentry->databaseoid = MyDatabaseId;
 				}
 			}
@@ -855,7 +860,7 @@ load_quotas(void)
 	}
 	heap_close(rel, NoLock);
 
-	ret = SPI_execute("select targetOid, quota int8 from quota.config", true, 0);
+	ret = SPI_execute("select targetOid, quotalimitMB from quota.config", true, 0);
 	if (ret != SPI_OK_SELECT)
 		elog(FATAL, "SPI_execute failed: error code %d", ret);
 
@@ -870,7 +875,7 @@ load_quotas(void)
 		HeapTuple	tup = SPI_tuptable->vals[i];
 		Datum		dat;
 		Oid			targetOid;
-		int64		quota_limit;
+		int64		quota_limit_mb;
 		bool		isnull;
 
 		dat = SPI_getbinval(tup, tupdesc, 1, &isnull);
@@ -881,12 +886,12 @@ load_quotas(void)
 		dat = SPI_getbinval(tup, tupdesc, 2, &isnull);
 		if (isnull)
 			continue;
-		quota_limit = DatumGetInt64(dat);
+		quota_limit_mb = DatumGetInt64(dat);
 
 		quota_entry = (QuotaLimitEntry *)hash_search(quota_limit_map,
 												&targetOid,
 												HASH_ENTER, &found);
-		quota_entry->limitsize = quota_limit;
+		quota_entry->limitsize = quota_limit_mb;
 	}
 
 }
@@ -1390,18 +1395,30 @@ start_worker(char* dbname)
  * Set disk quota limit for schema or role.
  */
 Datum
-set_disk_quota_limit(PG_FUNCTION_ARGS)
+set_schema_quota_limit(PG_FUNCTION_ARGS)
 {
 	int ret;
 	StringInfoData buf;
+	Oid namespaceId;
+	char *nspname;
+	int64 quota_limit_mb;
 
-	Oid		target_oid = (Oid)PG_GETARG_INT32(0);
-	int64	quota_limit = PG_GETARG_INT64(1);
+	if (!superuser())
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to set disk quota limit")));
+	}
+
+	nspname = (char *)PG_GETARG_CSTRING(0);
+	quota_limit_mb = PG_GETARG_INT64(1);
+
+	namespaceId = get_namespace_oid(nspname, false);
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
 					"insert into quota.config values(%u,%ld);",
-					target_oid,quota_limit);
+					namespaceId,quota_limit_mb);
 
 	SPI_connect();
 
@@ -1419,6 +1436,25 @@ set_disk_quota_limit(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+
+/*
+ * Set disk quota limit for schema or role.
+ */
+Datum
+show_schema_quota_limit(PG_FUNCTION_ARGS)
+{
+	int ret;
+	StringInfoData buf;
+	char *nspname;
+
+	nspname = (char *)PG_GETARG_CSTRING(0);
+
+	PG_RETURN_VOID();
+}
+
+
+
+
 /* enforcement */
 /*
  * Initialize enforcement, by installing the executor permission hook.
@@ -1426,8 +1462,13 @@ set_disk_quota_limit(PG_FUNCTION_ARGS)
 static void
 init_quota_enforcement(void)
 {
+	/* enforcement hook before query is loading data */
 	prev_ExecutorCheckPerms_hook = ExecutorCheckPerms_hook;
 	ExecutorCheckPerms_hook = quota_check_ExecCheckRTPerms;
+
+	/* enforcement hook during query is loading data*/
+	prev_BufferExtendCheckPerms_hook = BufferExtendCheckPerms_hook;
+	BufferExtendCheckPerms_hook = quota_check_ReadBufferExtendCheckPerms;
 }
 
 
@@ -1452,6 +1493,58 @@ get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid)
 	}
 }
 
+
+static bool
+quota_check_common(Oid reloid)
+{
+	Oid ownerOid = InvalidOid;
+	Oid nsOid = InvalidOid;
+	bool found;
+
+	get_rel_owner_schema(reloid, &ownerOid, &nsOid);
+	LWLockAcquire(shared->lock, LW_SHARED);
+	hash_search(disk_quota_black_map,
+				&reloid,
+				HASH_FIND, &found);
+	if (found)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_DISK_FULL),
+				 errmsg("table's disk space quota exceeded")));
+		return false;
+	}
+
+	if ( nsOid != InvalidOid)
+	{
+		hash_search(disk_quota_black_map,
+				&nsOid,
+				HASH_FIND, &found);
+		if (found)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_DISK_FULL),
+					 errmsg("schema's disk space quota exceeded")));
+			return false;
+		}
+
+	}
+
+	if ( ownerOid != InvalidOid)
+	{
+		hash_search(disk_quota_black_map,
+				&ownerOid,
+				HASH_FIND, &found);
+		if (found)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_DISK_FULL),
+					 errmsg("role's disk space quota exceeded")));
+			return false;
+		}
+	}
+	LWLockRelease(shared->lock);
+	return true;
+}
 /*
  * Permission check hook function. Throws an error if you try to INSERT
  * (or COPY) into a table, and the quota has been exceeded.
@@ -1464,10 +1557,6 @@ quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation)
 	foreach(l, rangeTable)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) lfirst(l);
-		Oid ownerOid = InvalidOid;
-		Oid nsOid = InvalidOid;
-		Oid reloid = InvalidOid;
-		bool found;
 
 		/* see ExecCheckRTEPerms() */
 		if (rte->rtekind != RTE_RELATION)
@@ -1481,52 +1570,26 @@ quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation)
 			continue;
 
 		/* Perform the check as the relation's owner and namespace */
+		quota_check_common(rte->relid);
 
-		reloid = rte->relid;
-		get_rel_owner_schema(reloid, &ownerOid, &nsOid);
-		elog(LOG,"TO delete: hubert insert or update table%u owner%u ns%u",reloid,ownerOid,nsOid);
-		LWLockAcquire(shared->lock, LW_SHARED);
-		hash_search(disk_quota_black_map,
-					&reloid,
-					HASH_FIND, &found);
-		if (found)
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_DISK_FULL),
-					 errmsg("table's disk space quota exceeded")));
-			return false;
-		}
-
-		if ( nsOid != InvalidOid)
-		{
-			hash_search(disk_quota_black_map,
-					&nsOid,
-					HASH_FIND, &found);
-			if (found)
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_DISK_FULL),
-						 errmsg("schema's disk space quota exceeded")));
-				return false;
-			}
-
-		}
-
-		if ( ownerOid != InvalidOid)
-		{
-			hash_search(disk_quota_black_map,
-					&ownerOid,
-					HASH_FIND, &found);
-			if (found)
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_DISK_FULL),
-						 errmsg("role's disk space quota exceeded")));
-				return false;
-			}
-		}
-		LWLockRelease(shared->lock);
 	}
 
+	return true;
+}
+
+static bool
+quota_check_ReadBufferExtendCheckPerms(Oid reloid, BlockNumber blockNum)
+{
+	bool isExtend;
+
+	isExtend = (blockNum == P_NEW);
+	/* if not buffer extend, we could skip quota limit check*/
+	if (!isExtend)
+	{
+		return true;
+	}
+
+	/* Perform the check as the relation's owner and namespace */
+	quota_check_common(reloid);
 	return true;
 }

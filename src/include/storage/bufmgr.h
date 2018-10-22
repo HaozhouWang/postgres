@@ -164,6 +164,14 @@ extern PGDLLIMPORT int32 *LocalRefCount;
 #define BufferGetPage(buffer) ((Page)BufferGetBlock(buffer))
 
 /*
+ * Hook for plugins to check permissions when doing a buffer extend.
+ * One example is to check whether there is additional disk quota for
+ * the table to be inserted.
+ */
+typedef bool (*BufferExtendCheckPerms_hook_type) (Oid, BlockNumber);
+extern PGDLLIMPORT BufferExtendCheckPerms_hook_type BufferExtendCheckPerms_hook;
+
+/*
  * prototypes for functions in bufmgr.c
  */
 extern void PrefetchBuffer(Relation reln, ForkNumber forkNum,
