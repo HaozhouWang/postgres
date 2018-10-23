@@ -66,6 +66,7 @@
 #include "utils/builtins.h"
 #include "tcop/utility.h"
 #include "executor/executor.h"
+#include "funcapi.h"
 
 PG_MODULE_MAGIC;
 
@@ -174,20 +175,29 @@ struct LocalBlackMapEntry
  * Get active table list to check their size
  */
 static HTAB *pgstat_table_map = NULL;
-static HTAB *pgstat_active_table_map = NULL;
-static HTAB *active_tables_map = NULL;
+//static HTAB *pgstat_active_table_map = NULL;
 
 /* Cache to detect the active table list */
-typedef struct DiskQuotaLocalTableCache
+typedef struct DiskQuotaSHMCache
 {
-	Oid			tableid;
-	PgStat_Counter tuples_inserted;
-	PgStat_Counter tuples_updated;
-	PgStat_Counter tuples_deleted;
-	PgStat_Counter vacuum_count;
-	PgStat_Counter autovac_vacuum_count;
-	PgStat_Counter tuples_living;
-} DiskQuotaLocalTableCache;
+	Oid         dbid;
+	Oid         relfilenode;
+	Oid         tablespaceoid;
+} DiskQuotaSHMCache;
+
+typedef struct DiskQuotaSizeResultsEntry
+{
+	Oid     tableoid;
+	Oid     dbid;
+	Size    tablesize;
+} DiskQuotaSizeResultsEntry;
+
+/* The results set cache for SRF call*/
+typedef struct DiskQuotaSetOFCache
+{
+	HTAB                *result;
+	HASH_SEQ_STATUS     pos;
+} DiskQuotaSetOFCache;
 
 /* struct to describe the active table */
 typedef struct DiskQuotaActiveHashEntry
@@ -195,16 +205,6 @@ typedef struct DiskQuotaActiveHashEntry
 	Oid			reloid;
 	PgStat_Counter t_refcount; /* TODO: using refcount for active queue */
 } DiskQuotaActiveHashEntry;
-
-
-/*
- * disk_quota_table_stat entry: store the last checked results of table status
- */
-typedef struct DiskQuotaStateHashEntry
-{
-	Oid			reloid;
-	DiskQuotaLocalTableCache t_entry;
-} DiskQuotaStatHashEntry;
 
 /* using hash table to support incremental update the table size entry.*/
 static HTAB *table_size_map = NULL;
@@ -550,15 +550,7 @@ update_role_map(Oid owneroid, int64 updatesize)
 static void
 add_to_pgstat_map(Oid relOid)
 {
-	DiskQuotaStatHashEntry *entry;
-	bool found;
 
-	entry = hash_search(pgstat_table_map, &relOid, HASH_ENTER, &found);
-
-	if (!found)
-	{
-		memset(&entry->t_entry, 0, sizeof(entry->t_entry));
-	}
 }
 
 static void
@@ -746,58 +738,15 @@ static void calculate_role_disk_usage(void)
 	}
 }
 
+/* TODO: Using SPI to this */
 static bool check_table_is_active(Oid reloid)
 {
-	bool found = false;
-	hash_search(active_tables_map, &reloid, HASH_REMOVE, &found);
-	if (found)
-	{
-		elog(DEBUG1,"table is active with oid:%u", reloid);
-	}
-    found = true;
-	return found;
+	return true;
 }
 
 static void build_active_table_map(void)
 {
-	DiskQuotaStatHashEntry *hash_entry;
-	HASH_SEQ_STATUS status;
 
-	hash_seq_init(&status, pgstat_table_map);
-
-	/* reset current pg_stat snapshot to get new data */
-	pgstat_clear_snapshot();
-
-	while ((hash_entry = (DiskQuotaStatHashEntry *) hash_seq_search(&status)) != NULL)
-	{
-
-		PgStat_StatTabEntry *stat_entry;
-
-		stat_entry = pgstat_fetch_stat_tabentry(hash_entry->reloid);
-		if (stat_entry == NULL) {
-			continue;
-		}
-
-		if (stat_entry->tuples_inserted != hash_entry->t_entry.tuples_inserted ||
-			stat_entry->tuples_updated != hash_entry->t_entry.tuples_updated ||
-			stat_entry->tuples_deleted != hash_entry->t_entry.tuples_deleted ||
-			stat_entry->autovac_vacuum_count !=  hash_entry->t_entry.autovac_vacuum_count ||
-			stat_entry->vacuum_count !=  hash_entry->t_entry.vacuum_count ||
-			stat_entry->n_live_tuples != hash_entry->t_entry.tuples_living)
-		{
-			/* Update the entry */
-			hash_entry->t_entry.tuples_inserted = stat_entry->tuples_inserted;
-			hash_entry->t_entry.tuples_updated = stat_entry->tuples_updated;
-			hash_entry->t_entry.tuples_deleted = stat_entry->tuples_deleted;
-			hash_entry->t_entry.autovac_vacuum_count = stat_entry->autovac_vacuum_count;
-			hash_entry->t_entry.vacuum_count = stat_entry->vacuum_count;
-			hash_entry->t_entry.tuples_living = stat_entry->n_live_tuples;
-
-			/* Add this entry to active hash table if not exist */
-			hash_search(pgstat_active_table_map, &hash_entry->reloid, HASH_ENTER, NULL);
-
-		}
-	}
 }
 
 /*
@@ -1024,55 +973,13 @@ init_disk_quota_model(void)
 									MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
 									&hash_ctl,
 									HASH_ELEM | HASH_CONTEXT);
-	if (pgstat_table_map == NULL)
-	{
-		HASHCTL ctl;
-
-		memset(&ctl, 0, sizeof(ctl));
-
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(DiskQuotaStatHashEntry);
-
-		pgstat_table_map = hash_create("disk quota Table State Entry lookup hash table",
-									NUM_WORKITEMS,
-									&ctl,
-									HASH_ELEM);
-	}
-
-	if (pgstat_active_table_map == NULL)
-	{
-		HASHCTL ctl;
-
-		memset(&ctl, 0, sizeof(ctl));
-
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(DiskQuotaActiveHashEntry);
-
-		pgstat_active_table_map = hash_create("disk quota Active Table Entry lookup hash table",
-									INIT_ACTIVE_TABLE_SIZE,
-									&ctl,
-									HASH_ELEM);
-	}
 }
 
+/* TODO: init SHM active tables*/
 static void
 init_shm_worker_active_tables()
 {
-	HASHCTL ctl;
-	memset(&ctl, 0, sizeof(ctl));
-	
 
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(ActiveTableEntry);
-
-	elog(LOG, "max tables = %d\n", worker_spi_max_active_tables);
-
-	active_tables_map = ShmemInitHash ("active_tables",
-				worker_spi_max_active_tables,
-				worker_spi_max_active_tables,
-				&ctl,
-				HASH_ELEM);
- 
 }
 
 void
@@ -1414,4 +1321,194 @@ quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation)
 	}
 
 	return true;
+}
+
+/*****************************************
+*
+*  DISK QUOTA HELPER FUNCTIONS
+*
+******************************************/
+
+PG_FUNCTION_INFO_V1(diskquota_fetch_active_table_stat);
+
+Datum
+diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	int call_cntr;
+	int max_calls;
+	AttInMetadata *attinmeta;
+	bool isFirstCall = true;
+
+	HTAB *localResultsCacheTable;
+	DiskQuotaSetOFCache *cache;
+	DiskQuotaSizeResultsEntry *results_entry;
+
+	/* Init the container list in the first call and get the results back */
+	if (SRF_IS_FIRSTCALL()) {
+		MemoryContext oldcontext;
+
+		HASHCTL ctl;
+		HTAB *localCacheTable = NULL;
+		HASH_SEQ_STATUS iter;
+		DiskQuotaSHMCache *shmCache_entry;
+		DiskQuotaSizeResultsEntry *sizeResults_entry;
+
+		ScanKeyData relfilenode_skey[2];
+		Relation	relation;
+		HeapTuple	tuple;
+		SysScanDesc relScan;
+		Oid			relOid;
+		TupleDesc tupdesc;
+
+		/* create a function context for cross-call persistence */
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/* switch to memory context appropriate for multiple function calls */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/* build skey */
+		MemSet(&relfilenode_skey, 0, sizeof(relfilenode_skey));
+
+		for (int i = 0; i < 2; i++)
+		{
+			fmgr_info_cxt(F_OIDEQ,
+			              &relfilenode_skey[i].sk_func,
+			              CacheMemoryContext);
+			relfilenode_skey[i].sk_strategy = BTEqualStrategyNumber;
+			relfilenode_skey[i].sk_subtype = InvalidOid;
+			relfilenode_skey[i].sk_collation = InvalidOid;
+		}
+
+		relfilenode_skey[0].sk_attno = Anum_pg_class_reltablespace;
+		relfilenode_skey[1].sk_attno = Anum_pg_class_relfilenode;
+
+		/* build the result HTAB */
+		memset(&ctl, 0, sizeof(ctl));
+
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(DiskQuotaSizeResultsEntry);
+		ctl.hcxt = funcctx->multi_call_memory_ctx;
+
+		localResultsCacheTable = hash_create("disk quota Active Table Entry lookup hash table",
+		                                     INIT_ACTIVE_TABLE_SIZE,
+		                                     &ctl,
+		                                     HASH_ELEM | HASH_CONTEXT);
+
+
+		/* check for plain relations by looking in pg_class */
+		relation = heap_open(RelationRelationId, AccessShareLock);
+
+		/* Read the SHM and using a local cache to store */
+		hash_seq_init(&iter, localCacheTable);
+
+		/* Scan whole HTAB, get the Oid of each table and calculate the size of them */
+		while ((shmCache_entry = (DiskQuotaSHMCache *) hash_seq_search(&iter)) != NULL)
+		{
+			Size tablesize;
+			bool found;
+
+			/* set scan arguments */
+			relfilenode_skey[0].sk_argument = ObjectIdGetDatum(shmCache_entry->tablespaceoid);
+			relfilenode_skey[1].sk_argument = ObjectIdGetDatum(shmCache_entry->relfilenode);
+
+			relScan = systable_beginscan(relation,
+			                             ClassTblspcRelfilenodeIndexId,
+			                             true,
+			                             NULL,
+			                             2,
+			                             relfilenode_skey);
+
+			tuple = systable_getnext(relScan);
+
+			if (!HeapTupleIsValid(tuple))
+			{
+				continue;
+			}
+			relOid = HeapTupleGetOid(tuple);
+
+			/* Call function directly to get size of table by oid */
+			tablesize = (Size) DatumGetInt64(DirectFunctionCall1(pg_total_relation_size, ObjectIdGetDatum(relOid)));
+
+			sizeResults_entry = (DiskQuotaSizeResultsEntry*) hash_search(localResultsCacheTable, &relOid, HASH_ENTER, &found);
+
+			if (!found)
+			{
+				sizeResults_entry->dbid = MyDatabaseId;
+				sizeResults_entry->tablesize = tablesize;
+				sizeResults_entry->tableoid = relOid;
+			}
+
+		}
+
+		systable_endscan(relScan);
+		heap_close(relation, AccessShareLock);
+
+		/* total number of active tables to be returned, each tuple contains one active table stat */
+		funcctx->max_calls = (uint32) hash_get_num_entries(localResultsCacheTable);
+
+		/*
+		 * prepare attribute metadata for next calls that generate the tuple
+		 */
+
+		tupdesc = CreateTemplateTupleDesc(3, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "TABLE_OID",
+		                   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "DATABASE_ID",
+		                   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "TABLE_SIZE",
+		                   INT8OID, -1, 0);
+
+		attinmeta = TupleDescGetAttInMetadata(tupdesc);
+		funcctx->attinmeta = attinmeta;
+
+		/* Prepare SetOf results HATB */
+		cache = (DiskQuotaSetOFCache *) palloc(sizeof(DiskQuotaSetOFCache));
+		cache->result = localResultsCacheTable;
+		hash_seq_init(&(cache->pos), localResultsCacheTable);
+
+		MemoryContextSwitchTo(oldcontext);
+	} else {
+		isFirstCall = false;
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	call_cntr = funcctx->call_cntr;
+	max_calls = funcctx->max_calls;
+	attinmeta = funcctx->attinmeta;
+
+	if (isFirstCall) {
+		funcctx->user_fctx = (void *) cache;
+	} else {
+		cache = (DiskQuotaSetOFCache *) funcctx->user_fctx;
+	}
+
+	/* return the results back to SPI caller */
+	while ((results_entry = (DiskQuotaSizeResultsEntry *) hash_seq_search(&(cache->pos))) != NULL)
+	{
+		Datum result;
+		Datum values[3];
+		bool nulls[3];
+		HeapTuple	tuple;
+
+		memset(values, 0, sizeof(values));
+		memset(nulls, false, sizeof(nulls));
+
+		values[0] = ObjectIdGetDatum(results_entry->tableoid);
+		values[1] = ObjectIdGetDatum(results_entry->dbid);
+		values[2] = Int64GetDatum(results_entry->tablesize);
+
+		tuple = heap_form_tuple(funcctx->attinmeta->tupdesc, values, nulls);
+
+		result = HeapTupleGetDatum(tuple);
+		funcctx->call_cntr++;
+
+		SRF_RETURN_NEXT(funcctx, result);
+	}
+
+	/* finished, do the clear staff */
+	hash_destroy(cache->result);
+	pfree(cache);
+	SRF_RETURN_DONE(funcctx);
 }
