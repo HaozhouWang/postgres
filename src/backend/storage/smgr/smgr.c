@@ -73,7 +73,7 @@ static const f_smgr smgrsw[] = {
 
 static const int NSmgr = lengthof(smgrsw);
 
-
+dq_report_hook_type dq_report_hook = NULL;
 /*
  * Each backend has a hashtable that stores all extant SMgrRelation objects.
  * In addition, "unowned" SMgrRelation objects are chained together in a list.

@@ -68,6 +68,7 @@
 #include "utils/builtins.h"
 #include "tcop/utility.h"
 #include "executor/executor.h"
+#include "storage/smgr.h"
 #include "funcapi.h"
 
 PG_MODULE_MAGIC;
@@ -93,6 +94,7 @@ void		_PG_fini(void);
 
 void		disk_quota_worker_spi_main(Datum);
 void		disk_quota_launcher_spi_main(Datum);
+Datum       diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS);
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
@@ -169,11 +171,6 @@ struct BlackMapEntry
 	Oid		databaseoid;
 };
 
-// active table entry in shm, one HTAB per segment
-struct ActiveTableEntry
-{
-	Oid	reloid;
-};
 typedef struct ActiveTableEntry ActiveTableEntry;
 
 /* local blacklist for which exceed their quota limit */
@@ -222,6 +219,7 @@ static HTAB *table_size_map = NULL;
 static HTAB *namespace_size_map = NULL;
 static HTAB *role_size_map = NULL;
 static HTAB *quota_limit_map = NULL;
+static HTAB *disk_quota_worker_map = NULL;
 
 /* black list for database objects which exceed their quota limit */
 static HTAB *disk_quota_black_map = NULL;
@@ -232,6 +230,7 @@ typedef struct
 	LWLock	   *lock;		/* protects shared memory of blackMap */
 } disk_quota_shared_state;
 static disk_quota_shared_state *shared;
+static disk_quota_shared_state *active_table_shm_lock;
 
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
@@ -254,7 +253,8 @@ static bool check_table_is_active(Oid reloid);
 static void build_active_table_map(void);
 static int64 calculate_total_relation_size_by_oid(Oid reloid);
 static void load_quotas(void);
-
+static void report_active_table(SMgrRelation reln);
+static HTAB* get_active_tables_shm(Oid databaseID);
 
 static Size DiskQuotaShmemSize(void);
 static void disk_quota_shmem_startup(void);
@@ -357,7 +357,7 @@ _PG_init(void)
 	dq_report_hook = report_active_table;
 }
 
-static void
+void
 _PG_fini(void)
 {
 	dq_report_hook = NULL;	
@@ -366,6 +366,22 @@ _PG_fini(void)
 static void
 report_active_table(SMgrRelation reln)
 {
+	void *entry;
+	DiskQuotaSHMCache item;
+	bool found = false;
+
+	item.dbid = reln->smgr_rnode.node.dbNode;
+	item.relfilenode = reln->smgr_rnode.node.relNode;
+	item.tablespaceoid = reln->smgr_rnode.node.spcNode;
+
+	LWLockAcquire(active_table_shm_lock->lock, LW_EXCLUSIVE);
+	entry = hash_search(active_tables_map, &item, HASH_ENTER_NULL, &found);
+	LWLockRelease(active_table_shm_lock->lock);
+
+	if (!found && entry == NULL) {
+		// not enough shm:
+		ereport(WARNING, (errmsg("Share memory is not enough for active tables")));
+	}
 }
 
 /*
@@ -871,8 +887,9 @@ DiskQuotaShmemSize(void)
 	Size		size;
 
 	size = MAXALIGN(sizeof(disk_quota_shared_state));
+	size = add_size(size, size); // 2 locks
 	size = add_size(size, hash_estimate_size(MAX_DISK_QUOTA_BLACK_ENTRIES, sizeof(BlackMapEntry)));
-	size = add_size(size, hash_estimate_size(worker_spi_max_active_tables, sizeof(ActiveTableEntry)));
+	size = add_size(size, hash_estimate_size(worker_spi_max_active_tables, sizeof(DiskQuotaSHMCache)));
 	return size;
 }
 
@@ -898,12 +915,25 @@ disk_quota_shmem_startup(void)
 	shared = ShmemInitStruct("disk_quota",
 								 sizeof(disk_quota_shared_state),
 								 &found);
+
 	if (!found)
 	{
 		//shared->lock = &(GetNamedLWLockTranche("disk_quota"))->lock;
 		//TODO this is not correct. should using disk quota lock
 		//need to add them to lwlock.h since named tranche not supported.
 		shared->lock = LWLockAssign();
+	}
+
+	active_table_shm_lock = ShmemInitStruct("disk_quota_active_table_shm_lock",
+									 sizeof(disk_quota_shared_state),
+									 &found);
+
+	if (!found)
+	{
+		//shared->lock = &(GetNamedLWLockTranche("disk_quota"))->lock;
+		//TODO this is not correct. should using disk quota lock
+		//need to add them to lwlock.h since named tranche not supported.
+		active_table_shm_lock->lock = LWLockAssign();
 	}
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
@@ -999,6 +1029,7 @@ init_disk_quota_model(void)
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(LocalBlackMapEntry);
+	hash_ctl.hcxt = DSModelContext;
 	local_disk_quota_black_map = hash_create("local blackmap whose quota limitation is reached",
 									MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
 									&hash_ctl,
@@ -1009,6 +1040,20 @@ init_disk_quota_model(void)
 static void
 init_shm_worker_active_tables()
 {
+	HASHCTL ctl;
+	memset(&ctl, 0, sizeof(ctl));
+
+
+	ctl.keysize = sizeof(DiskQuotaSHMCache);
+	ctl.entrysize = sizeof(DiskQuotaSHMCache);
+
+	elog(LOG, "max tables = %d\n", worker_spi_max_active_tables);
+
+	active_tables_map = ShmemInitHash ("active_tables",
+				worker_spi_max_active_tables,
+				worker_spi_max_active_tables,
+				&ctl,
+				HASH_ELEM);
 
 }
 
@@ -1746,11 +1791,12 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 		                                     HASH_ELEM | HASH_CONTEXT);
 
 
+		/* Read the SHM and using a local cache to store */
+		localCacheTable = get_active_tables_shm(MyDatabaseId);
+		hash_seq_init(&iter, localCacheTable);
+
 		/* check for plain relations by looking in pg_class */
 		relation = heap_open(RelationRelationId, AccessShareLock);
-
-		/* Read the SHM and using a local cache to store */
-		hash_seq_init(&iter, localCacheTable);
 
 		/* Scan whole HTAB, get the Oid of each table and calculate the size of them */
 		while ((shmCache_entry = (DiskQuotaSHMCache *) hash_seq_search(&iter)) != NULL)
@@ -1817,6 +1863,9 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 		cache->result = localResultsCacheTable;
 		hash_seq_init(&(cache->pos), localResultsCacheTable);
 
+		/* clean the local cache table */
+		hash_destroy(localCacheTable);
+
 		MemoryContextSwitchTo(oldcontext);
 	} else {
 		isFirstCall = false;
@@ -1861,4 +1910,61 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 	hash_destroy(cache->result);
 	pfree(cache);
 	SRF_RETURN_DONE(funcctx);
+}
+
+/**
+ *  Consume hash table in SHM
+ **/
+
+static
+HTAB* get_active_tables_shm(Oid databaseID)
+{
+	HASHCTL ctl;
+	HTAB *localHashTable = NULL;
+	HASH_SEQ_STATUS iter;
+	DiskQuotaSHMCache *shmCache_entry;
+	bool found;
+
+	int num = 0;
+
+	memset(&ctl, 0, sizeof(ctl));
+
+	ctl.keysize = sizeof(DiskQuotaSHMCache);
+	ctl.entrysize = sizeof(DiskQuotaSHMCache);
+	ctl.hcxt = CurrentMemoryContext;
+
+	localHashTable = hash_create("local blackmap whose quota limitation is reached",
+								MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
+								&ctl,
+								HASH_ELEM | HASH_CONTEXT);
+
+	init_shm_worker_active_tables();
+
+	active_table_shm_lock = ShmemInitStruct("disk_quota_active_table_shm_lock",
+							sizeof(disk_quota_shared_state),
+							&found);
+
+	LWLockAcquire(active_table_shm_lock->lock, LW_EXCLUSIVE);
+
+	hash_seq_init(&iter, active_tables_map);
+
+	while ((shmCache_entry = (DiskQuotaSHMCache *) hash_seq_search(&iter)) != NULL)
+	{
+
+		if (shmCache_entry->dbid != databaseID)
+		{
+			continue;
+		}
+
+		/* Add the active table entry into local hash table*/
+		hash_search(localHashTable, shmCache_entry, HASH_ENTER_NULL, NULL);
+		hash_search(active_tables_map, shmCache_entry, HASH_REMOVE, NULL);
+		num++;
+	}
+
+	LWLockRelease(active_table_shm_lock->lock);
+
+	elog(NOTICE, "number of active tables = %d\n", num);
+
+	return localHashTable;
 }
