@@ -1805,10 +1805,12 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 		{
 			Size tablesize;
 			bool found;
+			ScanKeyData skey[2];
 
 			/* set scan arguments */
-			relfilenode_skey[0].sk_argument = ObjectIdGetDatum(shmCache_entry->tablespaceoid);
-			relfilenode_skey[1].sk_argument = ObjectIdGetDatum(shmCache_entry->relfilenode);
+			memcpy(skey, relfilenode_skey, sizeof(skey));
+			skey[0].sk_argument = ObjectIdGetDatum(shmCache_entry->tablespaceoid);
+			skey[1].sk_argument = ObjectIdGetDatum(shmCache_entry->relfilenode);
 
 			relScan = systable_beginscan(relation,
 			                             ClassTblspcRelfilenodeIndexId,
@@ -1821,7 +1823,29 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 
 			if (!HeapTupleIsValid(tuple))
 			{
-				continue;
+
+				systable_endscan(relScan);
+
+				/* tablespace oid may be 0 if the table is in default table space*/
+				memcpy(skey, relfilenode_skey, sizeof(skey));
+				skey[0].sk_argument = ObjectIdGetDatum(0);
+				skey[1].sk_argument = ObjectIdGetDatum(shmCache_entry->relfilenode);
+
+				relScan = systable_beginscan(relation,
+				                             ClassTblspcRelfilenodeIndexId,
+				                             true,
+				                             NULL,
+				                             2,
+				                             relfilenode_skey);
+
+				tuple = systable_getnext(relScan);
+
+				if (!HeapTupleIsValid(tuple))
+				{
+					systable_endscan(relScan);
+					continue;
+				}
+
 			}
 			relOid = HeapTupleGetOid(tuple);
 
