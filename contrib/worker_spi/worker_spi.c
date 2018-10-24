@@ -57,6 +57,7 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/ps_status.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -71,6 +72,7 @@
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(set_schema_quota_limit);
+PG_FUNCTION_INFO_V1(set_role_quota_limit);
 
 
 /* cluster level max size of black list */
@@ -272,6 +274,8 @@ static BufferExtendCheckPerms_hook_type prev_BufferExtendCheckPerms_hook;
 static bool quota_check_ReadBufferExtendCheckPerms(Oid reloid, BlockNumber blockNum);
 static bool quota_check_common(Oid reloid);
 
+static void set_quota_limit_internal(Oid targetoid, int64 quota_limit_mb);
+static int64 get_size_in_mb(char *str);
 /*
  * Entrypoint of this module.
  *
@@ -1389,17 +1393,15 @@ start_worker(char* dbname)
 	return pid;
 }
 
-
 /*
- * Set disk quota limit for schema or role.
+ * Set disk quota limit for role.
  */
 Datum
-set_schema_quota_limit(PG_FUNCTION_ARGS)
+set_role_quota_limit(PG_FUNCTION_ARGS)
 {
-	int ret;
-	StringInfoData buf;
-	Oid namespaceId;
-	char *nspname;
+	Oid roleoid;
+	char *rolname;
+	char *sizestr;
 	int64 quota_limit_mb;
 
 	if (!superuser())
@@ -1409,15 +1411,57 @@ set_schema_quota_limit(PG_FUNCTION_ARGS)
 				 errmsg("must be superuser to set disk quota limit")));
 	}
 
-	nspname = (char *)PG_GETARG_CSTRING(0);
-	quota_limit_mb = PG_GETARG_INT64(1);
+	rolname = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	roleoid = get_role_oid(rolname, false);
+	
+	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	quota_limit_mb = get_size_in_mb(sizestr);
 
-	namespaceId = get_namespace_oid(nspname, false);
+	set_quota_limit_internal(roleoid, quota_limit_mb);
+	PG_RETURN_VOID();
+}
 
+/*
+ * Set disk quota limit for schema.
+ */
+Datum
+set_schema_quota_limit(PG_FUNCTION_ARGS)
+{
+	Oid namespaceoid;
+	char *nspname;
+	char *sizestr;
+	int64 quota_limit_mb;
+	if (!superuser())
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to set disk quota limit")));
+	}
+
+	nspname = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	namespaceoid = get_namespace_oid(nspname, false);
+
+	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	quota_limit_mb = get_size_in_mb(sizestr);
+
+	set_quota_limit_internal(namespaceoid, quota_limit_mb);
+	PG_RETURN_VOID();
+}
+
+/*
+ * Write the quota limit info into quota_config table under
+ * diskquota namespace of the database.
+ */
+static void
+set_quota_limit_internal(Oid targetoid, int64 quota_limit_mb)
+{
+	int ret;
+	StringInfoData buf;
+	
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
 					"insert into diskquota.quota_config values(%u,%ld);",
-					namespaceId,quota_limit_mb);
+					targetoid, quota_limit_mb);
 
 	SPI_connect();
 
@@ -1431,8 +1475,145 @@ set_schema_quota_limit(PG_FUNCTION_ARGS)
 	 * And finish our transaction.
 	 */
 	SPI_finish();
+	return;
+}
 
-	PG_RETURN_VOID();
+/*
+ * Convert a human-readable size to a size in MB.
+ */
+static int64
+get_size_in_mb(char *str)
+{
+	char	   *strptr,
+			   *endptr;
+	char		saved_char;
+	Numeric		num;
+	int64		result;
+	bool		have_digits = false;
+
+	/* Skip leading whitespace */
+	strptr = str;
+	while (isspace((unsigned char) *strptr))
+		strptr++;
+
+	/* Check that we have a valid number and determine where it ends */
+	endptr = strptr;
+
+	/* Part (1): sign */
+	if (*endptr == '-' || *endptr == '+')
+		endptr++;
+
+	/* Part (2): main digit string */
+	if (isdigit((unsigned char) *endptr))
+	{
+		have_digits = true;
+		do
+			endptr++;
+		while (isdigit((unsigned char) *endptr));
+	}
+
+	/* Part (3): optional decimal point and fractional digits */
+	if (*endptr == '.')
+	{
+		endptr++;
+		if (isdigit((unsigned char) *endptr))
+		{
+			have_digits = true;
+			do
+				endptr++;
+			while (isdigit((unsigned char) *endptr));
+		}
+	}
+
+	/* Complain if we don't have a valid number at this point */
+	if (!have_digits)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid size: \"%s\"", str)));
+
+	/* Part (4): optional exponent */
+	if (*endptr == 'e' || *endptr == 'E')
+	{
+		long		exponent;
+		char	   *cp;
+
+		/*
+		 * Note we might one day support EB units, so if what follows 'E'
+		 * isn't a number, just treat it all as a unit to be parsed.
+		 */
+		exponent = strtol(endptr + 1, &cp, 10);
+		(void) exponent;		/* Silence -Wunused-result warnings */
+		if (cp > endptr + 1)
+			endptr = cp;
+	}
+
+	/*
+	 * Parse the number, saving the next character, which may be the first
+	 * character of the unit string.
+	 */
+	saved_char = *endptr;
+	*endptr = '\0';
+
+	num = DatumGetNumeric(DirectFunctionCall3(numeric_in,
+											  CStringGetDatum(strptr),
+											  ObjectIdGetDatum(InvalidOid),
+											  Int32GetDatum(-1)));
+
+	*endptr = saved_char;
+
+	/* Skip whitespace between number and unit */
+	strptr = endptr;
+	while (isspace((unsigned char) *strptr))
+		strptr++;
+
+	/* Handle possible unit */
+	if (*strptr != '\0')
+	{
+		int64		multiplier = 0;
+
+		/* Trim any trailing whitespace */
+		endptr = str + strlen(str) - 1;
+
+		while (isspace((unsigned char) *endptr))
+			endptr--;
+
+		endptr++;
+		*endptr = '\0';
+
+		/* Parse the unit case-insensitively */
+		if (pg_strcasecmp(strptr, "mb") == 0)
+			multiplier = ((int64) 1);
+
+		else if (pg_strcasecmp(strptr, "gb") == 0)
+			multiplier = ((int64) 1024);
+
+		else if (pg_strcasecmp(strptr, "tb") == 0)
+			multiplier = ((int64) 1024) * 1024 ;
+
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid size: \"%s\"", str),
+					 errdetail("Invalid size unit: \"%s\".", strptr),
+					 errhint("Valid units are \"MB\", \"GB\", and \"TB\".")));
+
+		if (multiplier > 1)
+		{
+			Numeric		mul_num;
+
+			mul_num = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
+														  Int64GetDatum(multiplier)));
+
+			num = DatumGetNumeric(DirectFunctionCall2(numeric_mul,
+													  NumericGetDatum(mul_num),
+													  NumericGetDatum(num)));
+		}
+	}
+
+	result = DatumGetInt64(DirectFunctionCall1(numeric_int8,
+											   NumericGetDatum(num)));
+
+	return result;
 }
 
 /* enforcement */
