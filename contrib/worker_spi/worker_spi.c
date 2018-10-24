@@ -366,7 +366,7 @@ _PG_fini(void)
 static void
 report_active_table(SMgrRelation reln)
 {
-	void *entry;
+	DiskQuotaSHMCache *entry;
 	DiskQuotaSHMCache item;
 	bool found = false;
 
@@ -376,6 +376,8 @@ report_active_table(SMgrRelation reln)
 
 	LWLockAcquire(active_table_shm_lock->lock, LW_EXCLUSIVE);
 	entry = hash_search(active_tables_map, &item, HASH_ENTER_NULL, &found);
+	if (entry && !found)
+		*entry = item;
 	LWLockRelease(active_table_shm_lock->lock);
 
 	if (!found && entry == NULL) {
@@ -1826,6 +1828,8 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 			/* Call function directly to get size of table by oid */
 			tablesize = (Size) DatumGetInt64(DirectFunctionCall1(pg_total_relation_size, ObjectIdGetDatum(relOid)));
 
+			systable_endscan(relScan);
+
 			sizeResults_entry = (DiskQuotaSizeResultsEntry*) hash_search(localResultsCacheTable, &relOid, HASH_ENTER, &found);
 
 			if (!found)
@@ -1837,7 +1841,6 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 
 		}
 
-		systable_endscan(relScan);
 		heap_close(relation, AccessShareLock);
 
 		/* total number of active tables to be returned, each tuple contains one active table stat */
@@ -1950,6 +1953,8 @@ HTAB* get_active_tables_shm(Oid databaseID)
 
 	while ((shmCache_entry = (DiskQuotaSHMCache *) hash_seq_search(&iter)) != NULL)
 	{
+		bool  found;
+		DiskQuotaSHMCache *entry;
 
 		if (shmCache_entry->dbid != databaseID)
 		{
@@ -1957,7 +1962,8 @@ HTAB* get_active_tables_shm(Oid databaseID)
 		}
 
 		/* Add the active table entry into local hash table*/
-		hash_search(localHashTable, shmCache_entry, HASH_ENTER_NULL, NULL);
+		entry = hash_search(localHashTable, shmCache_entry, HASH_ENTER, &found);
+		*entry = *shmCache_entry;
 		hash_search(active_tables_map, shmCache_entry, HASH_REMOVE, NULL);
 		num++;
 	}
