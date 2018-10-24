@@ -89,6 +89,7 @@ PG_FUNCTION_INFO_V1(set_role_quota_limit);
 
 
 void		_PG_init(void);
+void		_PG_fini(void);
 
 void		disk_quota_worker_spi_main(Datum);
 void		disk_quota_launcher_spi_main(Datum);
@@ -352,6 +353,19 @@ _PG_init(void)
 	snprintf(worker.bgw_name, BGW_MAXLEN, "disk quota launcher");
 
 	RegisterBackgroundWorker(&worker);
+
+	dq_report_hook = report_active_table;
+}
+
+static void
+_PG_fini(void)
+{
+	dq_report_hook = NULL;	
+}
+
+static void
+report_active_table(SMgrRelation reln)
+{
 }
 
 /*
