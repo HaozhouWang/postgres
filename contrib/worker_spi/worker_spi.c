@@ -1048,6 +1048,7 @@ init_shm_worker_active_tables()
 
 	ctl.keysize = sizeof(DiskQuotaSHMCache);
 	ctl.entrysize = sizeof(DiskQuotaSHMCache);
+	ctl.hash = tag_hash;
 
 	elog(LOG, "max tables = %d\n", worker_spi_max_active_tables);
 
@@ -1055,7 +1056,7 @@ init_shm_worker_active_tables()
 				worker_spi_max_active_tables,
 				worker_spi_max_active_tables,
 				&ctl,
-				HASH_ELEM);
+				HASH_ELEM | HASH_FUNCTION);
 
 }
 
@@ -1786,11 +1787,12 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 		ctl.keysize = sizeof(Oid);
 		ctl.entrysize = sizeof(DiskQuotaSizeResultsEntry);
 		ctl.hcxt = funcctx->multi_call_memory_ctx;
+		ctl.hash = oid_hash;
 
 		localResultsCacheTable = hash_create("disk quota Active Table Entry lookup hash table",
 		                                     INIT_ACTIVE_TABLE_SIZE,
 		                                     &ctl,
-		                                     HASH_ELEM | HASH_CONTEXT);
+		                                     HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
 
 		/* Read the SHM and using a local cache to store */
@@ -1817,7 +1819,7 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 			                             true,
 			                             NULL,
 			                             2,
-			                             relfilenode_skey);
+			                             skey);
 
 			tuple = systable_getnext(relScan);
 
@@ -1836,7 +1838,7 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 				                             true,
 				                             NULL,
 				                             2,
-				                             relfilenode_skey);
+				                             skey);
 
 				tuple = systable_getnext(relScan);
 
@@ -1959,11 +1961,12 @@ HTAB* get_active_tables_shm(Oid databaseID)
 	ctl.keysize = sizeof(DiskQuotaSHMCache);
 	ctl.entrysize = sizeof(DiskQuotaSHMCache);
 	ctl.hcxt = CurrentMemoryContext;
+	ctl.hash = tag_hash;
 
 	localHashTable = hash_create("local blackmap whose quota limitation is reached",
 								MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
 								&ctl,
-								HASH_ELEM | HASH_CONTEXT);
+								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
 	init_shm_worker_active_tables();
 
