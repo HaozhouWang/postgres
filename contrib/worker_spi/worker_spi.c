@@ -53,7 +53,6 @@
 #include "nodes/makefuncs.h"
 #include "pgstat.h"
 #include "utils/builtins.h"
-//#include "utils/dbsize.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -616,7 +615,7 @@ static HTAB* get_active_table_lists(void)
 	ctl.hcxt = CurrentMemoryContext;
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "select diskquota_fetch_active_table_stat();");
+	appendStringInfo(&buf, "select * from diskquota_fetch_active_table_stat();");
 
 	active_table = hash_create("Active Table List Map for SPI",
 									1024,
@@ -2043,7 +2042,7 @@ HTAB* get_active_tables_shm(Oid databaseID)
 
 	LWLockRelease(active_table_shm_lock->lock);
 
-	elog(NOTICE, "number of active tables = %d\n", num);
+	elog(DEBUG1, "number of active tables = %d\n", num);
 
 	return localHashTable;
 }
