@@ -73,6 +73,13 @@
 
 PG_MODULE_MAGIC;
 
+/*****************************************
+*
+*  DISK QUOTA HELPER FUNCTIONS
+*
+******************************************/
+
+PG_FUNCTION_INFO_V1(diskquota_fetch_active_table_stat);
 PG_FUNCTION_INFO_V1(set_schema_quota_limit);
 PG_FUNCTION_INFO_V1(set_role_quota_limit);
 
@@ -237,8 +244,8 @@ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static void init_disk_quota_shmem(void);
 static void init_shm_worker_active_tables(void);
 static void init_disk_quota_model(void);
-static void refresh_disk_quota_model(void);
-static void calculate_table_disk_usage(void);
+static void refresh_disk_quota_model(bool force);
+static void calculate_table_disk_usage(bool force);
 static void calculate_schema_disk_usage(void);
 static void calculate_role_disk_usage(void);
 static void flush_local_black_map(void);
@@ -249,9 +256,7 @@ static void update_namespace_map(Oid namespaceoid, int64 updatesize);
 static void update_role_map(Oid owneroid, int64 updatesize);
 static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
-static bool check_table_is_active(Oid reloid);
-static void build_active_table_map(void);
-static int64 calculate_total_relation_size_by_oid(Oid reloid);
+static HTAB* get_active_table_lists();
 static void load_quotas(void);
 static void report_active_table(SMgrRelation reln);
 static HTAB* get_active_tables_shm(Oid databaseID);
@@ -596,43 +601,63 @@ update_role_map(Oid owneroid, int64 updatesize)
 
 }
 
-static void
-add_to_pgstat_map(Oid relOid)
-{
-
-}
-
-static void
-remove_pgstat_map(Oid relOid)
-{
-}
-
-static int64 calculate_total_relation_size_by_oid(Oid reloid)
+static HTAB* get_active_table_lists(void)
 {
 	int ret;
 	StringInfoData buf;
+	HTAB *active_table;
+	HASHCTL ctl;
+
+
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(DiskQuotaSizeResultsEntry);
+	ctl.hash = oid_hash;
+	ctl.hcxt = CurrentMemoryContext;
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "select pg_total_relation_size(%u);", reloid);
+	appendStringInfo(&buf, "select diskquota_fetch_active_table_stat();");
+
+	active_table = hash_create("Active Table List Map for SPI",
+									1024,
+									&ctl,
+									HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
 	ret = SPI_execute(buf.data, false, 0);
 
 	if (ret != SPI_OK_SELECT)
-		elog(FATAL, "cannot get table size %u error code %d",reloid, ret);
-	if (SPI_processed > 0)
-	{
-		bool		isnull;
-		int64		val;
+		elog(WARNING, "cannot get table size %u error code", ret);
 
-		val = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-										  SPI_tuptable->tupdesc,
-										  1, &isnull));
-		if (!isnull){
-			return val;
+	for (int i = 0; i < SPI_processed; i++)
+	{
+		bool isnull;
+		bool found;
+		DiskQuotaSizeResultsEntry *entry;
+		Oid tableOid;
+
+		tableOid = DatumGetObjectId(SPI_getbinval(SPI_tuptable->vals[i],
+												  SPI_tuptable->tupdesc,
+												  1, &isnull));
+
+		entry = (DiskQuotaSizeResultsEntry *) hash_search(active_table, &tableOid, HASH_ENTER, &found);
+
+		if (!found)
+		{
+			entry->tableoid = tableOid;
+			entry->dbid = DatumGetObjectId(SPI_getbinval(SPI_tuptable->vals[i],
+													  SPI_tuptable->tupdesc,
+													  2, &isnull));
+			entry->tablesize = (Size) DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
+															  SPI_tuptable->tupdesc,
+															  3, &isnull));
 		}
+
+
 	}
-	return 0;
+
+	return active_table;
 }
+
 /*
  *  Incremental way to update the disk quota of every database objects
  *  Recalculate the table's disk usage when it's a new table or be update.
@@ -642,18 +667,29 @@ static int64 calculate_total_relation_size_by_oid(Oid reloid)
  *
  */
 static void
-calculate_table_disk_usage(void)
+calculate_table_disk_usage(bool force)
 {
 	bool found;
+	bool active_tbl_found;
 	Relation	classRel;
 	HeapTuple	tuple;
 	HeapScanDesc relScan;
 	TableSizeEntry *tsentry;
 	Oid			relOid;
 	HASH_SEQ_STATUS iter;
+	HTAB *active_table;
+	DiskQuotaSizeResultsEntry *srentry;
 
 	classRel = heap_open(RelationRelationId, AccessShareLock);
 	relScan = heap_beginscan_catalog(classRel, 0, NULL);
+
+	/* call SPI to fetch active table size info as a tuple list(setof)
+	 * insert tuple into active table hash map
+	 * call clear and build_active_hash_map oid->size
+	 * */
+
+	active_table = get_active_table_lists();
+
 
 	while ((tuple = heap_getnext(relScan, ForwardScanDirection)) != NULL)
 	{
@@ -668,11 +704,19 @@ calculate_table_disk_usage(void)
 		if(relOid < FirstNormalObjectId)
 			continue;
 
-		/* skip to recalculate the tables which are not in active list.*/
-
 		tsentry = (TableSizeEntry *)hash_search(table_size_map,
 							 &relOid,
 							 HASH_ENTER, &found);
+
+		srentry = (DiskQuotaSizeResultsEntry *) hash_search(active_table, &relOid, HASH_FIND, &active_tbl_found);
+
+		/* skip to recalculate the tables which are not in active list.*/
+		if(!active_tbl_found && !force)
+		{
+			continue;
+		}
+
+
 		/* namespace and owner may be changed since last check*/
 		if (!found)
 		{
@@ -680,25 +724,34 @@ calculate_table_disk_usage(void)
 			tsentry->reloid = relOid;
 			tsentry->namespaceoid = classForm->relnamespace;
 			tsentry->owneroid = classForm->relowner;
-			tsentry->totalsize = calculate_total_relation_size_by_oid(relOid);
-			elog(LOG, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
+			if (!force)
+			{
+				tsentry->totalsize = (int64) srentry->tablesize;
+			}
+			else
+			{
+				tsentry->totalsize =  DatumGetInt64(DirectFunctionCall1(pg_total_relation_size,
+					ObjectIdGetDatum(relOid)));
+			}
+
+			elog(DEBUG1, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
+
 			update_namespace_map(tsentry->namespaceoid, tsentry->totalsize);
 			update_role_map(tsentry->owneroid, tsentry->totalsize);
-			/* add to pgstat_table_map hash map */
-			add_to_pgstat_map(relOid);
 		}
-		else if (check_table_is_active(tsentry->reloid))
+		else
 		{
 			/* if table size is modified*/
 			int64 oldtotalsize = tsentry->totalsize;
-			tsentry->totalsize = calculate_total_relation_size_by_oid(relOid);
-            elog(LOG, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
+			tsentry->totalsize = (int64) srentry->tablesize;
+
+            elog(DEBUG1, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
 
 			update_namespace_map(tsentry->namespaceoid, tsentry->totalsize - oldtotalsize);
 			update_role_map(tsentry->owneroid, tsentry->totalsize - oldtotalsize);
 		}
 		/* check the disk quota limit TODO only check the modified table */
-		//TODO
+
 		check_disk_quota_by_oid(tsentry->reloid, tsentry->totalsize);
 
 		/* if schema change */
@@ -720,6 +773,8 @@ calculate_table_disk_usage(void)
 	heap_endscan(relScan);
 	heap_close(classRel, AccessShareLock);
 
+	hash_destroy(active_table);
+
 	/* Process removed tables*/
 	hash_seq_init(&iter, table_size_map);
 
@@ -735,7 +790,6 @@ calculate_table_disk_usage(void)
 			hash_search(table_size_map,
 					&tsentry->reloid,
 					HASH_REMOVE, NULL);
-			remove_pgstat_map(tsentry->reloid);
 			continue;
 		}
 		ReleaseSysCache(tuple);
@@ -786,28 +840,17 @@ static void calculate_role_disk_usage(void)
 	}
 }
 
-/* TODO: Using SPI to this */
-static bool check_table_is_active(Oid reloid)
-{
-	return true;
-}
-
-static void build_active_table_map(void)
-{
-
-}
-
 /*
  * Scan file system, to update the model with all files.
  */
 static void
-refresh_disk_quota_model(void)
+refresh_disk_quota_model(bool force)
 {
 	reset_local_black_map();
 
 	/* recalculate the disk usage of table, schema and role */
 
-	calculate_table_disk_usage();
+	calculate_table_disk_usage(force);
 	calculate_schema_disk_usage();
 	calculate_role_disk_usage();
 
@@ -991,51 +1034,57 @@ init_disk_quota_model(void)
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(TableSizeEntry);
 	hash_ctl.hcxt = DSModelContext;
+	hash_ctl.hash = oid_hash;
 
 	table_size_map = hash_create("TableSizeEntry map",
 								1024,
 								&hash_ctl,
-								HASH_ELEM | HASH_CONTEXT);
+								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(NamespaceSizeEntry);
 	hash_ctl.hcxt = DSModelContext;
+	hash_ctl.hash = oid_hash;
 
 	namespace_size_map = hash_create("NamespaceSizeEntry map",
 								1024,
 								&hash_ctl,
-								HASH_ELEM | HASH_CONTEXT);
+								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(RoleSizeEntry);
 	hash_ctl.hcxt = DSModelContext;
+	hash_ctl.hash = oid_hash;
 
 	role_size_map = hash_create("RoleSizeEntry map",
 								1024,
 								&hash_ctl,
-								HASH_ELEM | HASH_CONTEXT);
+								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(QuotaLimitEntry);
 	hash_ctl.hcxt = DSModelContext;
+	hash_ctl.hash = oid_hash;
 
 	quota_limit_map = hash_create("QuotaLimitEntry map",
 								1024,
 								&hash_ctl,
-								HASH_ELEM | HASH_CONTEXT);
+								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(LocalBlackMapEntry);
 	hash_ctl.hcxt = DSModelContext;
+	hash_ctl.hash = oid_hash;
+
 	local_disk_quota_black_map = hash_create("local blackmap whose quota limitation is reached",
 									MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
 									&hash_ctl,
-									HASH_ELEM | HASH_CONTEXT);
+									HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 }
 
 /* TODO: init SHM active tables*/
@@ -1065,6 +1114,7 @@ disk_quota_worker_spi_main(Datum main_arg)
 {
 	char *dbname=MyBgworkerEntry->bgw_name;
 	elog(LOG,"start disk quota worker process to monitor database:%s", dbname);
+	bool init = true;
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, worker_spi_sighup);
@@ -1090,11 +1140,13 @@ disk_quota_worker_spi_main(Datum main_arg)
 		SPI_connect();
 		PushActiveSnapshot(GetTransactionSnapshot());
 		load_quotas();
-		build_active_table_map();
-		refresh_disk_quota_model();
+		refresh_disk_quota_model(init);
 		SPI_finish();
 		PopActiveSnapshot();
 		CommitTransactionCommand();
+
+		/* only need once */
+		init = false;
 
 		/*
 		 * Background workers mustn't call usleep() or any direct equivalent:
@@ -1721,13 +1773,7 @@ quota_check_ReadBufferExtendCheckPerms(Oid reloid, BlockNumber blockNum)
 	return true;
 }
 
-/*****************************************
-*
-*  DISK QUOTA HELPER FUNCTIONS
-*
-******************************************/
 
-PG_FUNCTION_INFO_V1(diskquota_fetch_active_table_stat);
 
 Datum
 diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
