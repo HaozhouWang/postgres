@@ -324,7 +324,7 @@ _PG_init(void)
 								gettext_noop("database list with disk quota monitored."),
 								NULL,
 								&worker_spi_monitored_database_list,
-								"postgres",
+								"",
 								PGC_SIGHUP, GUC_LIST_INPUT,
 								NULL,
 								NULL,
@@ -1241,17 +1241,24 @@ refresh_wokrer_list(void)
 	/* step 2: start new worker which appears in monitor dblist. */
 	foreach(cell, monitor_dblist)
 	{
+		DiskQuotaWorkerEntry* workerentry;
 		char *db_name;
+		pid_t pid;
 
 		db_name = (char *)lfirst(cell);
 		if (db_name == NULL || *db_name == '\0')
 		{
 			continue;
 		}
-		hash_search(disk_quota_worker_map,
+		workerentry = (DiskQuotaWorkerEntry *)hash_search(disk_quota_worker_map,
 							(void *)db_name,
 							HASH_FIND, &found);
-		if(!found)
+		if (found)
+		{
+			if (GetBackgroundWorkerPid(workerentry->handle, &pid) != BGWH_STARTED)
+				start_worker(db_name);
+		}
+		else
 		{
 			start_worker(db_name);
 		}
@@ -1684,7 +1691,7 @@ quota_check_common(Oid reloid)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_DISK_FULL),
-					 errmsg("schema's disk space quota exceeded")));
+					 errmsg("schema's disk space quota exceeded with name:%s", get_namespace_name(nsOid))));
 			return false;
 		}
 
@@ -1699,7 +1706,7 @@ quota_check_common(Oid reloid)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_DISK_FULL),
-					 errmsg("role's disk space quota exceeded")));
+					 errmsg("role's disk space quota exceeded with name:%s", GetUserNameFromId(ownerOid))));
 			return false;
 		}
 	}
