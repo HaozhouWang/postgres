@@ -538,7 +538,7 @@ static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage)
 
 	quota_limit_mb = quota_entry->limitsize;
 	current_usage_mb = current_usage / (1024 *1024);
-	if(current_usage_mb > quota_limit_mb)
+	if(current_usage_mb >= quota_limit_mb)
 	{
 		elog(LOG,"Put object %u to blacklist with quota limit:%d, current usage:%d",
 				targetOid, quota_limit_mb, current_usage_mb);
