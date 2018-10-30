@@ -65,6 +65,7 @@
 #include "utils/timestamp.h"
 #include "utils/tqual.h"
 #include "utils/builtins.h"
+#include "utils/varlena.h"
 #include "tcop/utility.h"
 #include "executor/executor.h"
 #include "storage/smgr.h"
@@ -267,6 +268,8 @@ static int start_worker(char* dbname);
 static List *get_database_list(void);
 static void refresh_wokrer_list(void);
 
+static void check_disk_quota_in_db(bool force);
+
 /* enforcement */
 static void init_quota_enforcement(void);
 static bool quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation);
@@ -351,7 +354,8 @@ _PG_init(void)
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = disk_quota_launcher_spi_main;
+	sprintf(worker.bgw_library_name, "diskquota");
+	sprintf(worker.bgw_function_name, "disk_quota_launcher_spi_main");
 	worker.bgw_notify_pid = 0;
 
 	snprintf(worker.bgw_name, BGW_MAXLEN, "disk quota launcher");
@@ -962,10 +966,7 @@ disk_quota_shmem_startup(void)
 
 	if (!found)
 	{
-		//shared->lock = &(GetNamedLWLockTranche("disk_quota"))->lock;
-		//TODO this is not correct. should using disk quota lock
-		//need to add them to lwlock.h since named tranche not supported.
-		shared->lock = LWLockAssign();
+		shared->lock = &(GetNamedLWLockTranche("disk_quota"))->lock;
 	}
 
 	active_table_shm_lock = ShmemInitStruct("disk_quota_active_table_shm_lock",
@@ -974,10 +975,8 @@ disk_quota_shmem_startup(void)
 
 	if (!found)
 	{
-		//shared->lock = &(GetNamedLWLockTranche("disk_quota"))->lock;
-		//TODO this is not correct. should using disk quota lock
-		//need to add them to lwlock.h since named tranche not supported.
-		active_table_shm_lock->lock = LWLockAssign();
+		active_table_shm_lock->lock = &(GetNamedLWLockTranche("disk_quota_active_table_shm_lock"))->lock;
+
 	}
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
@@ -1004,7 +1003,8 @@ init_disk_quota_shmem(void)
 	 * resources in pgss_shmem_startup().
 	 */
 	RequestAddinShmemSpace(DiskQuotaShmemSize());
-	//RequestNamedLWLockTranche("disk_quota", 1);
+	RequestNamedLWLockTranche("disk_quota", 1);
+	RequestNamedLWLockTranche("disk_quota_active_table_shm_lock", 1);
 
 	/*
 	 * Install startup hook to initialize our shared memory.
@@ -1108,12 +1108,24 @@ init_shm_worker_active_tables()
 
 }
 
+static void
+check_disk_quota_in_db(bool force)
+{
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	load_quotas();
+	refresh_disk_quota_model(force);
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+}
+
 void
 disk_quota_worker_spi_main(Datum main_arg)
 {
 	char *dbname=MyBgworkerEntry->bgw_name;
 	elog(LOG,"start disk quota worker process to monitor database:%s", dbname);
-	bool init = true;
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, worker_spi_sighup);
@@ -1123,10 +1135,11 @@ disk_quota_worker_spi_main(Datum main_arg)
 	BackgroundWorkerUnblockSignals();
 
 	/* Connect to our database */
-	BackgroundWorkerInitializeConnection(dbname, NULL);
+	BackgroundWorkerInitializeConnection(dbname, NULL, 0);
 
 
 	init_disk_quota_model();
+	check_disk_quota_in_db(true);
 
 	/*
 	 * Main loop: do this until the SIGTERM handler tells us to terminate
@@ -1134,18 +1147,6 @@ disk_quota_worker_spi_main(Datum main_arg)
 	while (!got_sigterm)
 	{
 		int			rc;
-
-		StartTransactionCommand();
-		SPI_connect();
-		PushActiveSnapshot(GetTransactionSnapshot());
-		load_quotas();
-		refresh_disk_quota_model(init);
-		SPI_finish();
-		PopActiveSnapshot();
-		CommitTransactionCommand();
-
-		/* only need once */
-		init = false;
 
 		/*
 		 * Background workers mustn't call usleep() or any direct equivalent:
@@ -1155,8 +1156,11 @@ disk_quota_worker_spi_main(Datum main_arg)
 		 */
 		rc = WaitLatch(&MyProc->procLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   worker_spi_naptime * 1000L);
+					   worker_spi_naptime * 1000L, PG_WAIT_EXTENSION);
 		ResetLatch(&MyProc->procLatch);
+
+		/* Do the work */
+		check_disk_quota_in_db(false);
 
 		/* emergency bailout if postmaster has died */
 		if (rc & WL_POSTMASTER_DEATH)
@@ -1183,7 +1187,11 @@ static List *
 get_database_list(void)
 {
 	List	   *dblist = NULL;
-	if (!SplitIdentifierString(worker_spi_monitored_database_list, ',', &dblist))
+	char       *dbstr;
+
+	dbstr = pstrdup(worker_spi_monitored_database_list);
+
+	if (!SplitIdentifierString(dbstr, ',', &dblist))
 	{
 		elog(FATAL, "cann't get database list from guc:'%s'", worker_spi_monitored_database_list);
 		return NULL;
@@ -1299,7 +1307,7 @@ disk_quota_launcher_spi_main(Datum main_arg)
 	BackgroundWorkerUnblockSignals();
 
 	/* Connect to our database */
-	BackgroundWorkerInitializeConnection("postgres", NULL);
+	BackgroundWorkerInitializeConnection("postgres", NULL, 0);
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
@@ -1339,7 +1347,7 @@ disk_quota_launcher_spi_main(Datum main_arg)
 		 */
 		rc = WaitLatch(&MyProc->procLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   worker_spi_naptime * 1000L);
+					   worker_spi_naptime * 1000L, PG_WAIT_EXTENSION);
 		ResetLatch(&MyProc->procLatch);
 
 		/* emergency bailout if postmaster has died */
@@ -1381,8 +1389,7 @@ start_worker(char* dbname)
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = NULL;		/* new worker might not have library loaded */
-	sprintf(worker.bgw_library_name, "worker_spi");
+	sprintf(worker.bgw_library_name, "diskquota");
 	sprintf(worker.bgw_function_name, "disk_quota_worker_spi_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN, "%s", dbname);
 	/* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
@@ -1723,7 +1730,7 @@ quota_check_common(Oid reloid)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_DISK_FULL),
-					 errmsg("role's disk space quota exceeded with name:%s", GetUserNameFromId(ownerOid))));
+					 errmsg("role's disk space quota exceeded with name:%s", GetUserNameFromId(ownerOid, false))));
 			return false;
 		}
 	}
