@@ -619,7 +619,7 @@ static HTAB* get_active_table_lists(void)
 	ctl.hcxt = CurrentMemoryContext;
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "select * from diskquota_fetch_active_table_stat();");
+	appendStringInfo(&buf, "select * from diskquota.diskquota_fetch_active_table_stat();");
 
 	active_table = hash_create("Active Table List Map for SPI",
 									1024,
@@ -882,7 +882,6 @@ load_quotas(void)
 		/* configuration table is missing. */
 		elog(LOG, "configuration table \"pg_quota.quotas\" is missing in database \"%s\"",
 			 get_database_name(MyDatabaseId));
-		heap_close(rel, NoLock);
 		return;
 	}
 	heap_close(rel, NoLock);
