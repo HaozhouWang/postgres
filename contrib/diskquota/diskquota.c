@@ -714,48 +714,43 @@ calculate_table_disk_usage(bool force)
 		srentry = (DiskQuotaSizeResultsEntry *) hash_search(active_table, &relOid, HASH_FIND, &active_tbl_found);
 
 		/* skip to recalculate the tables which are not in active list.*/
-		if(!active_tbl_found && !force)
+		if(active_tbl_found || force)
 		{
-			continue;
-		}
 
-
-		/* namespace and owner may be changed since last check*/
-		if (!found)
-		{
-			/* if it's a new table*/
-			tsentry->reloid = relOid;
-			tsentry->namespaceoid = classForm->relnamespace;
-			tsentry->owneroid = classForm->relowner;
-			if (!force)
+			/* namespace and owner may be changed since last check*/
+			if (!found)
 			{
-				tsentry->totalsize = (int64) srentry->tablesize;
+				/* if it's a new table*/
+				tsentry->reloid = relOid;
+				tsentry->namespaceoid = classForm->relnamespace;
+				tsentry->owneroid = classForm->relowner;
+				if (!force)
+				{
+					tsentry->totalsize = (int64) srentry->tablesize;
+				}
+				else
+				{
+					tsentry->totalsize =  DatumGetInt64(DirectFunctionCall1(pg_total_relation_size,
+														ObjectIdGetDatum(relOid)));
+				}
+
+				elog(DEBUG1, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
+
+				update_namespace_map(tsentry->namespaceoid, tsentry->totalsize);
+				update_role_map(tsentry->owneroid, tsentry->totalsize);
 			}
 			else
 			{
-				tsentry->totalsize =  DatumGetInt64(DirectFunctionCall1(pg_total_relation_size,
-					ObjectIdGetDatum(relOid)));
+				/* if table size is modified*/
+				int64 oldtotalsize = tsentry->totalsize;
+				tsentry->totalsize = (int64) srentry->tablesize;
+
+				elog(DEBUG1, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
+
+				update_namespace_map(tsentry->namespaceoid, tsentry->totalsize - oldtotalsize);
+				update_role_map(tsentry->owneroid, tsentry->totalsize - oldtotalsize);
 			}
-
-			elog(DEBUG1, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
-
-			update_namespace_map(tsentry->namespaceoid, tsentry->totalsize);
-			update_role_map(tsentry->owneroid, tsentry->totalsize);
 		}
-		else
-		{
-			/* if table size is modified*/
-			int64 oldtotalsize = tsentry->totalsize;
-			tsentry->totalsize = (int64) srentry->tablesize;
-
-            elog(DEBUG1, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
-
-			update_namespace_map(tsentry->namespaceoid, tsentry->totalsize - oldtotalsize);
-			update_role_map(tsentry->owneroid, tsentry->totalsize - oldtotalsize);
-		}
-		/* check the disk quota limit TODO only check the modified table */
-
-		check_disk_quota_by_oid(tsentry->reloid, tsentry->totalsize);
 
 		/* if schema change */
 		if (tsentry->namespaceoid != classForm->relnamespace)
