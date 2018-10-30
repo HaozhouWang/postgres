@@ -295,7 +295,7 @@ _PG_init(void)
 							"Duration between each check (in seconds).",
 							NULL,
 							&worker_spi_naptime,
-							10,
+							2,
 							1,
 							INT_MAX,
 							PGC_SIGHUP,
@@ -500,7 +500,7 @@ static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage)
 
 	quota_limit_mb = quota_entry->limitsize;
 	current_usage_mb = current_usage / (1024 *1024);
-	if(current_usage_mb > quota_limit_mb)
+	if(current_usage_mb >= quota_limit_mb)
 	{
 		elog(LOG,"Put object %u to blacklist with quota limit:%d, current usage:%d",
 				targetOid, quota_limit_mb, current_usage_mb);
@@ -858,7 +858,6 @@ load_quotas(void)
 		/* configuration table is missing. */
 		elog(LOG, "configuration table \"pg_quota.quotas\" is missing in database \"%s\"",
 			 get_database_name(MyDatabaseId));
-		heap_close(rel, NoLock);
 		return;
 	}
 	heap_close(rel, NoLock);
