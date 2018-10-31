@@ -71,6 +71,7 @@
 #include "storage/smgr.h"
 #include "funcapi.h"
 
+#include "diskquota.h"
 PG_MODULE_MAGIC;
 
 /*****************************************
@@ -251,11 +252,11 @@ static void calculate_role_disk_usage(void);
 static void flush_local_black_map(void);
 static void reset_local_black_map(void);
 static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage);
-//static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
 static void update_namespace_map(Oid namespaceoid, int64 updatesize);
 static void update_role_map(Oid owneroid, int64 updatesize);
 static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
+static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
 static HTAB* get_active_table_lists();
 static bool load_quotas(void);
 static void report_active_table(SMgrRelation reln);
@@ -269,16 +270,6 @@ static List *get_database_list(void);
 static void refresh_wokrer_list(void);
 
 static void check_disk_quota_in_db(bool force);
-
-/* enforcement */
-static void init_quota_enforcement(void);
-static bool quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation);
-static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
-static ExecutorCheckPerms_hook_type prev_ExecutorCheckPerms_hook;
-static BufferExtendCheckPerms_hook_type prev_BufferExtendCheckPerms_hook;
-
-static bool quota_check_ReadBufferExtendCheckPerms(Oid reloid, BlockNumber blockNum);
-static bool quota_check_common(Oid reloid);
 
 static void set_quota_internal(Oid targetoid, int64 quota_limit_mb);
 static int64 get_size_in_mb(char *str);
@@ -294,7 +285,7 @@ _PG_init(void)
 	BackgroundWorker worker;
 
 	init_disk_quota_shmem();
-	init_quota_enforcement();
+	init_disk_quota_enforcement();
 
 	/* get the configuration */
 	DefineCustomIntVariable("worker_spi.naptime",
@@ -1676,23 +1667,6 @@ get_size_in_mb(char *str)
 	return result;
 }
 
-/* enforcement */
-/*
- * Initialize enforcement, by installing the executor permission hook.
- */
-static void
-init_quota_enforcement(void)
-{
-	/* enforcement hook before query is loading data */
-	prev_ExecutorCheckPerms_hook = ExecutorCheckPerms_hook;
-	ExecutorCheckPerms_hook = quota_check_ExecCheckRTPerms;
-
-	/* enforcement hook during query is loading data*/
-	prev_BufferExtendCheckPerms_hook = BufferExtendCheckPerms_hook;
-	BufferExtendCheckPerms_hook = quota_check_ReadBufferExtendCheckPerms;
-}
-
-
 static void
 get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid)
 {
@@ -1715,7 +1689,7 @@ get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid)
 }
 
 
-static bool
+bool
 quota_check_common(Oid reloid)
 {
 	Oid ownerOid = InvalidOid;
@@ -1766,56 +1740,6 @@ quota_check_common(Oid reloid)
 	LWLockRelease(shared->lock);
 	return true;
 }
-/*
- * Permission check hook function. Throws an error if you try to INSERT
- * (or COPY) into a table, and the quota has been exceeded.
- */
-static bool
-quota_check_ExecCheckRTPerms(List *rangeTable, bool ereport_on_violation)
-{
-	ListCell   *l;
-
-	foreach(l, rangeTable)
-	{
-		RangeTblEntry *rte = (RangeTblEntry *) lfirst(l);
-
-		/* see ExecCheckRTEPerms() */
-		if (rte->rtekind != RTE_RELATION)
-			continue;
-
-		/*
-		 * Only check quota on inserts. UPDATEs may well increase
-		 * space usage too, but we ignore that for now.
-		 */
-		if ((rte->requiredPerms & ACL_INSERT) == 0 && (rte->requiredPerms & ACL_UPDATE) == 0)
-			continue;
-
-		/* Perform the check as the relation's owner and namespace */
-		quota_check_common(rte->relid);
-
-	}
-
-	return true;
-}
-
-static bool
-quota_check_ReadBufferExtendCheckPerms(Oid reloid, BlockNumber blockNum)
-{
-	bool isExtend;
-
-	isExtend = (blockNum == P_NEW);
-	/* if not buffer extend, we could skip quota limit check*/
-	if (!isExtend)
-	{
-		return true;
-	}
-
-	/* Perform the check as the relation's owner and namespace */
-	quota_check_common(reloid);
-	return true;
-}
-
-
 
 Datum
 diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)

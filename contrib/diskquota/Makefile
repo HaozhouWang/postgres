@@ -4,6 +4,7 @@ MODULES = diskquota
 
 EXTENSION = diskquota
 DATA = diskquota--1.0.sql
+OBJS = diskquota.o enforcement.o
 REGRESS = test_diskquota
 REGRESS_OPTS = --temp-config=test_diskquota.conf --temp-instance=/tmp/pg_diskquota_test
 ifdef USE_PGXS
