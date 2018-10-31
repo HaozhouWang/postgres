@@ -630,7 +630,7 @@ static HTAB* get_active_table_lists(void)
 
 	if (ret != SPI_OK_SELECT)
 		elog(WARNING, "cannot get table size %u error code", ret);
-
+	elog(LOG, "active table number: %d",SPI_processed);
 	for (int i = 0; i < SPI_processed; i++)
 	{
 		bool isnull;
@@ -1092,8 +1092,6 @@ init_shm_worker_active_tables()
 	ctl.entrysize = sizeof(DiskQuotaSHMCache);
 	ctl.hash = tag_hash;
 
-	elog(LOG, "max tables = %d\n", worker_spi_max_active_tables);
-
 	active_tables_map = ShmemInitHash ("active_tables",
 				worker_spi_max_active_tables,
 				worker_spi_max_active_tables,
@@ -1105,6 +1103,7 @@ init_shm_worker_active_tables()
 static void
 check_disk_quota_in_db(bool force)
 {
+	elog(LOG,"check disk quota begin");
 	StartTransactionCommand();
 	SPI_connect();
 	PushActiveSnapshot(GetTransactionSnapshot());
@@ -1113,6 +1112,7 @@ check_disk_quota_in_db(bool force)
 	SPI_finish();
 	PopActiveSnapshot();
 	CommitTransactionCommand();
+	elog(LOG,"check disk quota end");
 }
 
 void
