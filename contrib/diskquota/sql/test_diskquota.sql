@@ -9,7 +9,7 @@ select pg_sleep(5);
 
 -- Test schema quota 
 create schema s1;
-select diskquota.set_schema_quota_limit('s1', '1 MB');
+select diskquota.set_schema_quota('s1', '1 MB');
 set search_path to s1;
 
 create table a(i int);
@@ -29,7 +29,7 @@ CREATE role u1 NOLOGIN;
 CREATE TABLE b (t text);
 ALTER TABLE b OWNER TO u1;
 
-select diskquota.set_role_quota_limit('u1', '1 MB');
+select diskquota.set_role_quota('u1', '1 MB');
 
 insert into b select generate_series(1,100);
 -- expect insert fail
@@ -59,7 +59,7 @@ reset search_path;
 
 -- Test copy
 create schema s3;
-select diskquota.set_schema_quota_limit('s3', '1 MB');
+select diskquota.set_schema_quota('s3', '1 MB');
 set search_path to s3;
 
 create table c (i int);
@@ -72,7 +72,7 @@ reset search_path;
 
 -- Test Update
 create schema s4;
-select diskquota.set_schema_quota_limit('s4', '1 MB');
+select diskquota.set_schema_quota('s4', '1 MB');
 set search_path to s4;
 create table a(i int);
 insert into a select generate_series(1,50000);
@@ -83,7 +83,7 @@ reset search_path;
 
 -- Test toast
 create schema s5;
-select diskquota.set_schema_quota_limit('s5', '1 MB');
+select diskquota.set_schema_quota('s5', '1 MB');
 set search_path to s5;
 CREATE TABLE a5 (message text);
 INSERT INTO a5
@@ -103,7 +103,7 @@ reset search_path;
 
 -- Test vacuum full
 create schema s6;
-select diskquota.set_schema_quota_limit('s6', '1 MB');
+select diskquota.set_schema_quota('s6', '1 MB');
 set search_path to s6;
 create table a6 (i int);
 insert into a6 select generate_series(1,50000);
@@ -119,7 +119,7 @@ reset search_path;
 
 -- Test truncate
 create schema s7;
-select diskquota.set_schema_quota_limit('s7', '1 MB');
+select diskquota.set_schema_quota('s7', '1 MB');
 set search_path to s7;
 create table a7 (i int);
 insert into a7 select generate_series(1,50000);

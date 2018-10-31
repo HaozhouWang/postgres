@@ -17,8 +17,8 @@ select pg_sleep(5);
 
 -- Test schema quota 
 create schema s1;
-select diskquota.set_schema_quota_limit('s1', '1 MB');
- set_schema_quota_limit 
+select diskquota.set_schema_quota('s1', '1 MB');
+ set_schema_quota 
 ------------------------
  
 (1 row)
@@ -41,8 +41,8 @@ reset search_path;
 CREATE role u1 NOLOGIN;
 CREATE TABLE b (t text);
 ALTER TABLE b OWNER TO u1;
-select diskquota.set_role_quota_limit('u1', '1 MB');
- set_role_quota_limit 
+select diskquota.set_role_quota('u1', '1 MB');
+ set_role_quota 
 ----------------------
  
 (1 row)
@@ -90,8 +90,8 @@ ERROR:  schema's disk space quota exceeded with name:s1
 reset search_path;
 -- Test copy
 create schema s3;
-select diskquota.set_schema_quota_limit('s3', '1 MB');
- set_schema_quota_limit 
+select diskquota.set_schema_quota('s3', '1 MB');
+ set_schema_quota 
 ------------------------
  
 (1 row)
@@ -113,8 +113,8 @@ ERROR:  schema's disk space quota exceeded with name:s3
 reset search_path;
 -- Test Update
 create schema s4;
-select diskquota.set_schema_quota_limit('s4', '1 MB');
- set_schema_quota_limit 
+select diskquota.set_schema_quota('s4', '1 MB');
+ set_schema_quota 
 ------------------------
  
 (1 row)
@@ -134,8 +134,8 @@ ERROR:  schema's disk space quota exceeded with name:s4
 reset search_path;
 -- Test toast
 create schema s5;
-select diskquota.set_schema_quota_limit('s5', '1 MB');
- set_schema_quota_limit 
+select diskquota.set_schema_quota('s5', '1 MB');
+ set_schema_quota 
 ------------------------
  
 (1 row)
@@ -163,8 +163,8 @@ ERROR:  schema's disk space quota exceeded with name:s5
 reset search_path;
 -- Test vacuum full
 create schema s6;
-select diskquota.set_schema_quota_limit('s6', '1 MB');
- set_schema_quota_limit 
+select diskquota.set_schema_quota('s6', '1 MB');
+ set_schema_quota 
 ------------------------
  
 (1 row)
@@ -194,8 +194,8 @@ insert into a6 select generate_series(1,30);
 reset search_path;
 -- Test truncate
 create schema s7;
-select diskquota.set_schema_quota_limit('s7', '1 MB');
- set_schema_quota_limit 
+select diskquota.set_schema_quota('s7', '1 MB');
+ set_schema_quota 
 ------------------------
  
 (1 row)

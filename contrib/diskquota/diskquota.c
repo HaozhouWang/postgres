@@ -80,8 +80,8 @@ PG_MODULE_MAGIC;
 ******************************************/
 
 PG_FUNCTION_INFO_V1(diskquota_fetch_active_table_stat);
-PG_FUNCTION_INFO_V1(set_schema_quota_limit);
-PG_FUNCTION_INFO_V1(set_role_quota_limit);
+PG_FUNCTION_INFO_V1(set_schema_quota);
+PG_FUNCTION_INFO_V1(set_role_quota);
 
 
 /* cluster level max size of black list */
@@ -257,7 +257,7 @@ static void update_role_map(Oid owneroid, int64 updatesize);
 static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
 static HTAB* get_active_table_lists();
-static void load_quotas(void);
+static bool load_quotas(void);
 static void report_active_table(SMgrRelation reln);
 static HTAB* get_active_tables_shm(Oid databaseID);
 
@@ -280,7 +280,7 @@ static BufferExtendCheckPerms_hook_type prev_BufferExtendCheckPerms_hook;
 static bool quota_check_ReadBufferExtendCheckPerms(Oid reloid, BlockNumber blockNum);
 static bool quota_check_common(Oid reloid);
 
-static void set_quota_limit_internal(Oid targetoid, int64 quota_limit_mb);
+static void set_quota_internal(Oid targetoid, int64 quota_limit_mb);
 static int64 get_size_in_mb(char *str);
 /*
  * Entrypoint of this module.
@@ -630,7 +630,7 @@ static HTAB* get_active_table_lists(void)
 
 	if (ret != SPI_OK_SELECT)
 		elog(WARNING, "cannot get table size %u error code", ret);
-	elog(LOG, "active table number: %d",SPI_processed);
+	elog(LOG, "active table number: %lu",SPI_processed);
 	for (int i = 0; i < SPI_processed; i++)
 	{
 		bool isnull;
@@ -858,7 +858,7 @@ refresh_disk_quota_model(bool force)
 /*
  * Load quotas from configuration table.
  */
-static void
+static bool
 load_quotas(void)
 {
 	int			ret;
@@ -875,9 +875,10 @@ load_quotas(void)
 	if (!rel)
 	{
 		/* configuration table is missing. */
-		elog(LOG, "configuration table \"pg_quota.quotas\" is missing in database \"%s\"",
+		elog(LOG, "configuration table \"pg_quota.quotas\" is missing in database \"%s\"," 
+				" please recreate diskquota extension",
 			 get_database_name(MyDatabaseId));
-		return;
+		return false;
 	}
 	heap_close(rel, NoLock);
 
@@ -914,7 +915,7 @@ load_quotas(void)
 												HASH_ENTER, &found);
 		quota_entry->limitsize = quota_limit_mb;
 	}
-
+	return true;
 }
 
 
@@ -1107,8 +1108,11 @@ check_disk_quota_in_db(bool force)
 	StartTransactionCommand();
 	SPI_connect();
 	PushActiveSnapshot(GetTransactionSnapshot());
-	load_quotas();
-	refresh_disk_quota_model(force);
+	/* skip refresh model when load_quotas failed */
+	if (load_quotas())
+	{
+		refresh_disk_quota_model(force);
+	}
 	SPI_finish();
 	PopActiveSnapshot();
 	CommitTransactionCommand();
@@ -1422,7 +1426,7 @@ start_worker(char* dbname)
  * Set disk quota limit for role.
  */
 Datum
-set_role_quota_limit(PG_FUNCTION_ARGS)
+set_role_quota(PG_FUNCTION_ARGS)
 {
 	Oid roleoid;
 	char *rolname;
@@ -1442,7 +1446,7 @@ set_role_quota_limit(PG_FUNCTION_ARGS)
 	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	quota_limit_mb = get_size_in_mb(sizestr);
 
-	set_quota_limit_internal(roleoid, quota_limit_mb);
+	set_quota_internal(roleoid, quota_limit_mb);
 	PG_RETURN_VOID();
 }
 
@@ -1450,7 +1454,7 @@ set_role_quota_limit(PG_FUNCTION_ARGS)
  * Set disk quota limit for schema.
  */
 Datum
-set_schema_quota_limit(PG_FUNCTION_ARGS)
+set_schema_quota(PG_FUNCTION_ARGS)
 {
 	Oid namespaceoid;
 	char *nspname;
@@ -1465,11 +1469,10 @@ set_schema_quota_limit(PG_FUNCTION_ARGS)
 
 	nspname = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	namespaceoid = get_namespace_oid(nspname, false);
-
 	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	quota_limit_mb = get_size_in_mb(sizestr);
 
-	set_quota_limit_internal(namespaceoid, quota_limit_mb);
+	set_quota_internal(namespaceoid, quota_limit_mb);
 	PG_RETURN_VOID();
 }
 
@@ -1478,24 +1481,56 @@ set_schema_quota_limit(PG_FUNCTION_ARGS)
  * diskquota namespace of the database.
  */
 static void
-set_quota_limit_internal(Oid targetoid, int64 quota_limit_mb)
+set_quota_internal(Oid targetoid, int64 quota_limit_mb)
 {
 	int ret;
 	StringInfoData buf;
 	
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
-					"insert into diskquota.quota_config values(%u,%ld);",
-					targetoid, quota_limit_mb);
+					"select * from diskquota.quota_config where targetOid = %u",
+					targetoid);
 
 	SPI_connect();
-
-	/* We can now execute queries via SPI */
+	
 	ret = SPI_execute(buf.data, false, 0);
+	if (ret != SPI_OK_SELECT)
+		elog(ERROR, "cannot select quota setting table: error code %d", ret);
 
-	if (ret != SPI_OK_INSERT)
-		elog(ERROR, "cannot insert into quota setting table, error code %d", ret);
-
+	/* if the schema or role's quota has been set before*/
+	if (SPI_processed == 0 && quota_limit_mb > 0)
+	{
+		resetStringInfo(&buf);
+		initStringInfo(&buf);
+		appendStringInfo(&buf,
+					"insert into diskquota.quota_config values(%u,%ld);",
+					targetoid, quota_limit_mb);
+		ret = SPI_execute(buf.data, false, 0);
+		if (ret != SPI_OK_INSERT)
+			elog(ERROR, "cannot insert into quota setting table, error code %d", ret);
+	}
+	else if (SPI_processed > 0 && quota_limit_mb <= 0)
+	{
+		resetStringInfo(&buf);
+		initStringInfo(&buf);
+		appendStringInfo(&buf,
+					"delete from diskquota.quota_config where targetOid=%u;",
+					targetoid);
+		ret = SPI_execute(buf.data, false, 0);
+		if (ret != SPI_OK_DELETE)
+			elog(ERROR, "cannot delete item from quota setting table, error code %d", ret);
+	}
+	else if(SPI_processed > 0 && quota_limit_mb > 0)
+	{
+		resetStringInfo(&buf);
+		initStringInfo(&buf);
+		appendStringInfo(&buf,
+					"update diskquota.quota_config set quotalimitMB = %ld where targetOid=%u;",
+					quota_limit_mb, targetoid);
+		ret = SPI_execute(buf.data, false, 0);
+		if (ret != SPI_OK_UPDATE)
+			elog(ERROR, "cannot update quota setting table, error code %d", ret);
+	}
 	/*
 	 * And finish our transaction.
 	 */
@@ -1786,8 +1821,6 @@ Datum
 diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *funcctx;
-	int call_cntr;
-	int max_calls;
 	AttInMetadata *attinmeta;
 	bool isFirstCall = true;
 
@@ -1955,8 +1988,6 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 
 	funcctx = SRF_PERCALL_SETUP();
 
-	call_cntr = funcctx->call_cntr;
-	max_calls = funcctx->max_calls;
 	attinmeta = funcctx->attinmeta;
 
 	if (isFirstCall) {
