@@ -65,3 +65,10 @@ Run regression tests.
 cd contrib/disk_quota; 
 make installcheck
 ```
+
+
+# Known Issue.
+BEGIN;
+create table a;
+insert into a select generate_series(1,100000);
+END;
