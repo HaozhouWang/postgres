@@ -3,8 +3,7 @@ create extension diskquota;
 select pg_sleep(1);
 
 \! pg_ctl -D /tmp/pg_diskquota_test/data reload
-\! cp data/clarge.txt /tmp/clarge.txt
-\! cp data/clarge.txt /tmp/csmall.txt
+\! cp data/csmall.txt /tmp/csmall.txt
 select pg_sleep(5);
 
 -- Test schema quota 
