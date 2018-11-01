@@ -522,6 +522,7 @@ set_role_quota(PG_FUNCTION_ARGS)
 	}
 
 	rolname = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	rolname = str_tolower(rolname, strlen(rolname), DEFAULT_COLLATION_OID);
 	roleoid = get_role_oid(rolname, false);
 	
 	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));

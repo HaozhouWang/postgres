@@ -8,8 +8,8 @@ SRCDIR = ./
 FILES = $(shell find $(SRCDIR) -type f -name "*.c")
 OBJS = diskquota.o enforcement.o quotamodel.o activetable.o
 
-REGRESS = test_diskquota
-REGRESS_OPTS = --temp-config=test_diskquota.conf --temp-instance=/tmp/pg_diskquota_test
+REGRESS = foo
+REGRESS_OPTS = --temp-config=test_diskquota.conf --temp-instance=/tmp/pg_diskquota_test  --schedule=diskquota_schedule
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
