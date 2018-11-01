@@ -591,8 +591,8 @@ set_quota_internal(Oid targetoid, int64 quota_limit_mb, QuotaType type)
 		resetStringInfo(&buf);
 		initStringInfo(&buf);
 		appendStringInfo(&buf,
-					"delete from diskquota.quota_config where targetoid=%u;"
-					" and quotatype=%d",
+					"delete from diskquota.quota_config where targetoid=%u"
+					" and quotatype=%d;",
 					targetoid, type);
 		ret = SPI_execute(buf.data, false, 0);
 		if (ret != SPI_OK_DELETE)
@@ -603,8 +603,8 @@ set_quota_internal(Oid targetoid, int64 quota_limit_mb, QuotaType type)
 		resetStringInfo(&buf);
 		initStringInfo(&buf);
 		appendStringInfo(&buf,
-					"update diskquota.quota_config set quotalimitMB = %ld where targetoid=%u;"
-					" and quotatype=%d",
+					"update diskquota.quota_config set quotalimitMB = %ld where targetoid=%u"
+					" and quotatype=%d;",
 					quota_limit_mb, targetoid, type);
 		ret = SPI_execute(buf.data, false, 0);
 		if (ret != SPI_OK_UPDATE)

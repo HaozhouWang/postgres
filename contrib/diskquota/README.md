@@ -1,12 +1,15 @@
 # Overview
-disk_quota is an extension that provides disk usage enforcement for database objects in Postgresql. Currently it supports to set quota limit on schema and role in a given database and limit the amount of disk space that a schema or a role can use. 
+Diskquota is an extension that provides disk usage enforcement for database objects in Postgresql. Currently it supports to set quota limit on schema and role in a given database and limit the amount of disk space that a schema or a role can use. 
 
-This project is inspired by Heikki's pg_quota project link(https://github.com/hlinnaka/pg_quota) and enhance it to support different kinds of DDL and DML which may change the disk usage of database objects. 
+This project is inspired by Heikki's pg_quota project (link: https://github.com/hlinnaka/pg_quota) and enhance it to support different kinds of DDL and DML which may change the disk usage of database objects. 
+
+Diskquota is a soft limit of disk uages. It has some delay to detect the schemas or roles whose quota limit is exceeded. Here 'soft limit' support two kinds of encforcement:  Query loading data into out-of-quota schema/role will be forbidden before query is running. Query loading data into schema/role with rooms will be cancelled when the quota limit is reached dynamically during the query is running. 
 
 temp table??
 # Design
 Diskquota extension is based on background worker framework in Postgresql.
 There are two kinds of background workers: diskquota launcher and diskquota worker.
+
 There is only one laucher process per database cluster(i.e. one laucher per postmaster).
 Launcher process is reponsible for manage worker processes: Calling RegisterDynamicBackgroundWorker() 
 to create new workers and keep their handle. Calling TerminateBackgroundWorker() to
@@ -17,8 +20,7 @@ Currently, we support to monitor at most 10 databases at the same time.
 Worker processes are responsible for monitoring the disk usage of schemas and roles for the target database, 
 and do quota enfocement. It will periodically recalcualte the table size of active tables, and update their corresponding schema or owner's disk usage. Then compare with quota limit for those schemas or roles. If exceeds the limit, put the corresponding schemas or roles into the blacklist in shared memory. Schemas or roles in blacklist are used to do query enforcement to cancel queries which plan to load data into these schemas or roles.
 
-Active tables are the tables whose table size may change in the last quota check interval. We use hooks in smgecreate(), smgrextend() and smgrtruncate() to detect active tables.
-Table size is calcualted by calling pg_total_relation_size(). It will sum the size of table(vm, fsm), toast, index.
+Active tables are the tables whose table size may change in the last quota check interval. We use hooks in smgecreate(), smgrextend() and smgrtruncate() to detect active tables and store them(currently relfilenode) in the shared memory. Diskquota worker process will periodically consuming active table in shared memories, convert relfilenode to relaton oid, and calcualte table size by calling pg_total_relation_size(), which will sum the size of table(base, vm, fsm), toast, index.
 
 Enforcement is implemented as hooks. There are two kinds of enforcement hooks: enforcement before query is running and
 enforcement during query is running.
@@ -122,8 +124,8 @@ create table a;
 insert into a select generate_series(1,200000);
 # quota enforcement works on table b
 insert into b select generate_series(1,200000);
-# quota enforcement works on table a since schema
-# s1's quota limit reached.
+# quota enforcement works on table a,
+# since quota limit of schema s1 has already exceeds.
 insert into a select generate_series(1,200000);
 END;
 ```
