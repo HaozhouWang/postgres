@@ -319,6 +319,11 @@ static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, QuotaTyp
 											&targetOid,
 											HASH_FIND, &found);
 	}
+	else
+	{
+		/* skip check if not namespace or role quota*/
+		return;
+	}
 
 	if (!found)
 	{

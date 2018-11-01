@@ -107,6 +107,13 @@ to this database from diskquota worker process. DBA need to first remove this
 database from worker_spi.monitor_databases in postgres.conf, and reload 
 configuration by call `pg_ctl reload`. Then database could be dropped successfully.
 
+2. Temp table.
+
+Diskquota supports to limit the disk usage of temp table as well. But schema and role are different.
+For role, i.e. the owner of the temp table, diakquota will treat it the same as normal tables and sum its
+table size to its owner's quota. While for schema, temp table is located under namespace 'pg_temp_backend_id',
+so temp table size will not sum to the current schema's qouta.
+
 # Known Issue.
 Since Postgresql doesn't support READ UNCOMMITTED isolation level, 
 our implementation cannot detect the new created table inside an
