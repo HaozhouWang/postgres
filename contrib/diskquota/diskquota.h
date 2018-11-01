@@ -1,6 +1,12 @@
 #ifndef DISK_QUOTA_H
 #define DISK_QUOTA_H
 
+typedef enum
+{
+	NAMESPACE_QUOTA,
+	ROLE_QUOTA
+} QuotaType;
+
 /* enforcement interface*/
 extern void init_disk_quota_enforcement(void);
 

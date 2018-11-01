@@ -1,75 +1,45 @@
 /* -------------------------------------------------------------------------
  *
- * worker_spi.c
- *		Sample background worker code that demonstrates various coding
- *		patterns: establishing a database connection; starting and committing
- *		transactions; using GUC variables, and heeding SIGHUP to reread
- *		the configuration file; reporting to pg_stat_activity; using the
- *		process latch to sleep and exit in case of postmaster death.
+ * quotamodel.c
  *
- * This code connects to a database, creates a schema and table, and summarizes
- * the numbers contained therein.  To see it working, insert an initial value
- * with "total" type and some initial value; then insert some other rows with
- * "delta" type.  Delta rows will be deleted by this worker and their values
- * aggregated into the total.
+ * This code is responsible for init disk quota model and refresh disk quota 
+ * model.
  *
  * Copyright (C) 2013, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *		contrib/worker_spi/worker_spi.c
+ *		contrib/diskquota/quotamodel.c
  *
  * -------------------------------------------------------------------------
  */
 #include "postgres.h"
 
-/* These are always necessary for a bgworker */
 #include "access/heapam.h"
 #include "access/htup_details.h"
-#include "access/multixact.h"
 #include "access/reloptions.h"
 #include "access/transam.h"
 #include "access/xact.h"
-#include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
-#include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
+#include "commands/dbcommands.h"
+#include "executor/spi.h"
+#include "funcapi.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
-#include "postmaster/bgworker.h"
-#include "storage/bufmgr.h"
+#include "nodes/makefuncs.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lwlock.h"
-#include "storage/proc.h"
 #include "storage/shmem.h"
-
-/* these headers are used by this particular worker's code */
-#include "commands/dbcommands.h"
-#include "executor/spi.h"
-#include "fmgr.h"
-#include "lib/stringinfo.h"
-#include "nodes/makefuncs.h"
-#include "pgstat.h"
+#include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/numeric.h"
-#include "utils/ps_status.h"
-#include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
-#include "utils/timeout.h"
-#include "utils/timestamp.h"
-#include "utils/tqual.h"
-#include "utils/builtins.h"
-#include "utils/varlena.h"
-#include "tcop/utility.h"
-#include "executor/executor.h"
-#include "storage/smgr.h"
-#include "funcapi.h"
 
 #include "diskquota.h"
 
@@ -87,24 +57,11 @@ PG_FUNCTION_INFO_V1(diskquota_fetch_active_table_stat);
 #define INIT_DISK_QUOTA_BLACK_ENTRIES 8192
 /* per database level max size of black list */
 #define MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES 8192
-/* max number of disk quota worker process */
-#define NUM_WORKITEMS			10
 /* initial active table size */
 #define INIT_ACTIVE_TABLE_SIZE	64
 
 
-Datum       diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS);
-
-typedef struct worktable
-{
-	const char *schema;
-	const char *name;
-} worktable;
-
-
-
-/* Memory context for long-lived data */
-//static MemoryContext diskquotaMemCxt;
+Datum	diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS);
 
 typedef struct TableSizeEntry TableSizeEntry;
 typedef struct NamespaceSizeEntry NamespaceSizeEntry;
@@ -186,18 +143,13 @@ typedef struct DiskQuotaSetOFCache
 	HASH_SEQ_STATUS     pos;
 } DiskQuotaSetOFCache;
 
-/* struct to describe the active table */
-typedef struct DiskQuotaActiveHashEntry
-{
-	Oid			reloid;
-	PgStat_Counter t_refcount; /* TODO: using refcount for active queue */
-} DiskQuotaActiveHashEntry;
 
 /* using hash table to support incremental update the table size entry.*/
 static HTAB *table_size_map = NULL;
 static HTAB *namespace_size_map = NULL;
 static HTAB *role_size_map = NULL;
-static HTAB *quota_limit_map = NULL;
+static HTAB *namespace_quota_limit_map = NULL;
+static HTAB *role_quota_limit_map = NULL;
 
 /* black list for database objects which exceed their quota limit */
 static HTAB *disk_quota_black_map = NULL;
@@ -219,16 +171,16 @@ static void calculate_schema_disk_usage(void);
 static void calculate_role_disk_usage(void);
 static void flush_local_black_map(void);
 static void reset_local_black_map(void);
-static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage);
+static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, QuotaType type);
 static void update_namespace_map(Oid namespaceoid, int64 updatesize);
 static void update_role_map(Oid owneroid, int64 updatesize);
 static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
 static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
-static HTAB* get_active_table_lists();
+static HTAB *get_active_table_lists();
 static bool load_quotas(void);
 static void report_active_table(SMgrRelation reln);
-static HTAB* get_active_tables_shm(Oid databaseID);
+static HTAB *get_active_tables_shm(Oid databaseID);
 
 static Size DiskQuotaShmemSize(void);
 static void disk_quota_shmem_startup(void);
@@ -347,7 +299,7 @@ reset_local_black_map(void)
  * Compare the disk quota limit and current usage of a database object.
  * Put them into local blacklist if quota limit is exceeded.
  */
-static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage)
+static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, QuotaType type)
 {
 	bool					found;
 	int32 					quota_limit_mb;
@@ -355,9 +307,19 @@ static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage)
 	LocalBlackMapEntry*	localblackentry;
 
 	QuotaLimitEntry* quota_entry;
-	quota_entry = (QuotaLimitEntry *)hash_search(quota_limit_map,
+	if (type == NAMESPACE_QUOTA)
+	{
+		quota_entry = (QuotaLimitEntry *)hash_search(namespace_quota_limit_map,
 											&targetOid,
 											HASH_FIND, &found);
+	}
+	else if (type == ROLE_QUOTA)
+	{
+		quota_entry = (QuotaLimitEntry *)hash_search(role_quota_limit_map,
+											&targetOid,
+											HASH_FIND, &found);
+	}
+
 	if (!found)
 	{
 		/* default no limit */
@@ -640,7 +602,7 @@ static void calculate_schema_disk_usage(void)
 		}
 		ReleaseSysCache(tuple);
 		elog(DEBUG1, "check namespace:%u with usage:%ld", nsentry->namespaceoid, nsentry->totalsize);
-		check_disk_quota_by_oid(nsentry->namespaceoid, nsentry->totalsize);
+		check_disk_quota_by_oid(nsentry->namespaceoid, nsentry->totalsize, NAMESPACE_QUOTA);
 	}
 }
 
@@ -662,7 +624,7 @@ static void calculate_role_disk_usage(void)
 		}
 		ReleaseSysCache(tuple);
 		elog(DEBUG1, "check role:%u with usage:%ld", rolentry->owneroid, rolentry->totalsize);
-		check_disk_quota_by_oid(rolentry->owneroid, rolentry->totalsize);
+		check_disk_quota_by_oid(rolentry->owneroid, rolentry->totalsize, ROLE_QUOTA);
 	}
 }
 
@@ -703,22 +665,28 @@ load_quotas(void)
 	if (!rel)
 	{
 		/* configuration table is missing. */
-		elog(LOG, "configuration table \"pg_quota.quotas\" is missing in database \"%s\"," 
+		elog(LOG, "configuration table \"quota_config\" is missing in database \"%s\"," 
 				" please recreate diskquota extension",
 			 get_database_name(MyDatabaseId));
 		return false;
 	}
 	heap_close(rel, NoLock);
 
-	ret = SPI_execute("select targetOid, quotalimitMB from diskquota.quota_config", true, 0);
+	ret = SPI_execute("select targetoid, quotatype, quotalimitMB from diskquota.quota_config", true, 0);
 	if (ret != SPI_OK_SELECT)
 		elog(FATAL, "SPI_execute failed: error code %d", ret);
 
 	tupdesc = SPI_tuptable->tupdesc;
-	if (tupdesc->natts != 2 ||
+	if (tupdesc->natts != 3 ||
 		TupleDescAttr(tupdesc, 0)->atttypid != OIDOID ||
-		TupleDescAttr(tupdesc, 1)->atttypid != INT8OID)
-		elog(ERROR, "query must yield two columns, oid and int8");
+		TupleDescAttr(tupdesc, 1)->atttypid != INT4OID ||
+		TupleDescAttr(tupdesc, 2)->atttypid != INT8OID)
+	{
+		elog(LOG, "configuration table \"quota_config\" is corruptted in database \"%s\"," 
+				" please recreate diskquota extension",
+			 get_database_name(MyDatabaseId));
+		return false;
+	}
 
 	for (i = 0; i < SPI_processed; i++)
 	{
@@ -726,22 +694,38 @@ load_quotas(void)
 		Datum		dat;
 		Oid			targetOid;
 		int64		quota_limit_mb;
+		QuotaType	quotatype;
 		bool		isnull;
 
 		dat = SPI_getbinval(tup, tupdesc, 1, &isnull);
 		if (isnull)
 			continue;
 		targetOid = DatumGetObjectId(dat);
-
+		
 		dat = SPI_getbinval(tup, tupdesc, 2, &isnull);
+		if (isnull)
+			continue;
+		quotatype = (QuotaType)DatumGetInt32(dat);
+
+		dat = SPI_getbinval(tup, tupdesc, 3, &isnull);
 		if (isnull)
 			continue;
 		quota_limit_mb = DatumGetInt64(dat);
 
-		quota_entry = (QuotaLimitEntry *)hash_search(quota_limit_map,
+		if (quotatype == NAMESPACE_QUOTA)
+		{
+			quota_entry = (QuotaLimitEntry *)hash_search(namespace_quota_limit_map,
 												&targetOid,
 												HASH_ENTER, &found);
-		quota_entry->limitsize = quota_limit_mb;
+			quota_entry->limitsize = quota_limit_mb;
+		}
+		else if (quotatype == ROLE_QUOTA)
+		{
+			quota_entry = (QuotaLimitEntry *)hash_search(role_quota_limit_map,
+												&targetOid,
+												HASH_ENTER, &found);
+			quota_entry->limitsize = quota_limit_mb;
+		}
 	}
 	return true;
 }
@@ -750,7 +734,7 @@ load_quotas(void)
 
 /*
  * DiskQuotaShmemSize
- *		Compute space needed for diskquota-related shared memory
+ * Compute space needed for diskquota-related shared memory
  */
 Size
 DiskQuotaShmemSize(void)
@@ -898,11 +882,16 @@ init_disk_quota_model(void)
 	hash_ctl.hcxt = DSModelContext;
 	hash_ctl.hash = oid_hash;
 
-	quota_limit_map = hash_create("QuotaLimitEntry map",
+	namespace_quota_limit_map = hash_create("Namespace QuotaLimitEntry map",
 								1024,
 								&hash_ctl,
 								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
+	role_quota_limit_map = hash_create("Role QuotaLimitEntry map",
+								1024,
+								&hash_ctl,
+								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
+	
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(LocalBlackMapEntry);
@@ -1262,6 +1251,7 @@ HTAB* get_active_tables_shm(Oid databaseID)
 								&ctl,
 								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
+	//TODO: why init twice??
 	init_shm_worker_active_tables();
 
 	active_table_shm_lock = ShmemInitStruct("disk_quota_active_table_shm_lock",

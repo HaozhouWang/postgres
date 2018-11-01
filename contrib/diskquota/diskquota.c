@@ -1,75 +1,31 @@
 /* -------------------------------------------------------------------------
  *
- * worker_spi.c
- *		Sample background worker code that demonstrates various coding
- *		patterns: establishing a database connection; starting and committing
- *		transactions; using GUC variables, and heeding SIGHUP to reread
- *		the configuration file; reporting to pg_stat_activity; using the
- *		process latch to sleep and exit in case of postmaster death.
+ * diskquota.c
  *
- * This code connects to a database, creates a schema and table, and summarizes
- * the numbers contained therein.  To see it working, insert an initial value
- * with "total" type and some initial value; then insert some other rows with
- * "delta" type.  Delta rows will be deleted by this worker and their values
- * aggregated into the total.
+ * Diskquota is used to limit the amount of disk space that a schema or a role
+ * can use. Diskquota is based on background worker framework. It contains a 
+ * launcher process which is reponsible for starting/refreshing the diskquota 
+ * worker processes which monitor given databases. 
  *
  * Copyright (C) 2013, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *		contrib/worker_spi/worker_spi.c
+ *		contrib/diskquota/diskquota.c
  *
  * -------------------------------------------------------------------------
  */
 #include "postgres.h"
 
-/* These are always necessary for a bgworker */
-#include "access/heapam.h"
-#include "access/htup_details.h"
-#include "access/multixact.h"
-#include "access/reloptions.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "catalog/dependency.h"
-#include "catalog/indexing.h"
 #include "catalog/namespace.h"
-#include "catalog/pg_class.h"
-#include "catalog/pg_database.h"
-#include "catalog/pg_tablespace.h"
-#include "catalog/pg_type.h"
-#include "miscadmin.h"
-#include "postmaster/bgworker.h"
-#include "storage/bufmgr.h"
-#include "storage/ipc.h"
-#include "storage/latch.h"
-#include "storage/lwlock.h"
-#include "storage/proc.h"
-#include "storage/shmem.h"
-
-/* these headers are used by this particular worker's code */
-#include "commands/dbcommands.h"
 #include "executor/spi.h"
-#include "fmgr.h"
-#include "lib/stringinfo.h"
-#include "nodes/makefuncs.h"
+#include "miscadmin.h"
 #include "pgstat.h"
-#include "utils/builtins.h"
-#include "utils/fmgroids.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/numeric.h"
-#include "utils/ps_status.h"
-#include "utils/rel.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
-#include "utils/timeout.h"
-#include "utils/timestamp.h"
-#include "utils/tqual.h"
-#include "utils/builtins.h"
-#include "utils/varlena.h"
+#include "postmaster/bgworker.h"
+#include "storage/ipc.h"
 #include "tcop/utility.h"
-#include "executor/executor.h"
-#include "storage/smgr.h"
-#include "funcapi.h"
+#include "utils/builtins.h"
+#include "utils/numeric.h"
+#include "utils/varlena.h"
 
 #include "diskquota.h"
 PG_MODULE_MAGIC;
@@ -77,6 +33,7 @@ PG_MODULE_MAGIC;
 /* disk quota helper function */
 PG_FUNCTION_INFO_V1(set_schema_quota);
 PG_FUNCTION_INFO_V1(set_role_quota);
+
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
@@ -103,16 +60,15 @@ struct DiskQuotaWorkerEntry
 static HTAB *disk_quota_worker_map = NULL;
 
 /* functions of disk quota*/
-void		_PG_init(void);
-void		_PG_fini(void);
-
-void		disk_quota_worker_spi_main(Datum);
-void		disk_quota_launcher_spi_main(Datum);
+void	_PG_init(void);
+void	_PG_fini(void);
+void	disk_quota_worker_spi_main(Datum);
+void	disk_quota_launcher_spi_main(Datum);
 
 static List	*get_database_list(void);
 static int64 get_size_in_mb(char *str);
 static void refresh_wokrer_list(void);
-static void set_quota_internal(Oid targetoid, int64 quota_limit_mb);
+static void set_quota_internal(Oid targetoid, int64 quota_limit_mb, QuotaType type);
 static int 	start_worker(char* dbname);
 
 
@@ -566,7 +522,7 @@ set_role_quota(PG_FUNCTION_ARGS)
 	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	quota_limit_mb = get_size_in_mb(sizestr);
 
-	set_quota_internal(roleoid, quota_limit_mb);
+	set_quota_internal(roleoid, quota_limit_mb, ROLE_QUOTA);
 	PG_RETURN_VOID();
 }
 
@@ -592,7 +548,7 @@ set_schema_quota(PG_FUNCTION_ARGS)
 	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	quota_limit_mb = get_size_in_mb(sizestr);
 
-	set_quota_internal(namespaceoid, quota_limit_mb);
+	set_quota_internal(namespaceoid, quota_limit_mb, NAMESPACE_QUOTA);
 	PG_RETURN_VOID();
 }
 
@@ -601,15 +557,16 @@ set_schema_quota(PG_FUNCTION_ARGS)
  * diskquota namespace of the database.
  */
 static void
-set_quota_internal(Oid targetoid, int64 quota_limit_mb)
+set_quota_internal(Oid targetoid, int64 quota_limit_mb, QuotaType type)
 {
 	int ret;
 	StringInfoData buf;
 	
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
-					"select * from diskquota.quota_config where targetOid = %u",
-					targetoid);
+					"select * from diskquota.quota_config where targetoid = %u"
+					" and quotatype =%d",
+					targetoid, type);
 
 	SPI_connect();
 	
@@ -623,8 +580,8 @@ set_quota_internal(Oid targetoid, int64 quota_limit_mb)
 		resetStringInfo(&buf);
 		initStringInfo(&buf);
 		appendStringInfo(&buf,
-					"insert into diskquota.quota_config values(%u,%ld);",
-					targetoid, quota_limit_mb);
+					"insert into diskquota.quota_config values(%u,%d,%ld);",
+					targetoid, type, quota_limit_mb);
 		ret = SPI_execute(buf.data, false, 0);
 		if (ret != SPI_OK_INSERT)
 			elog(ERROR, "cannot insert into quota setting table, error code %d", ret);
@@ -634,8 +591,9 @@ set_quota_internal(Oid targetoid, int64 quota_limit_mb)
 		resetStringInfo(&buf);
 		initStringInfo(&buf);
 		appendStringInfo(&buf,
-					"delete from diskquota.quota_config where targetOid=%u;",
-					targetoid);
+					"delete from diskquota.quota_config where targetoid=%u;"
+					" and quotatype=%d",
+					targetoid, type);
 		ret = SPI_execute(buf.data, false, 0);
 		if (ret != SPI_OK_DELETE)
 			elog(ERROR, "cannot delete item from quota setting table, error code %d", ret);
@@ -645,8 +603,9 @@ set_quota_internal(Oid targetoid, int64 quota_limit_mb)
 		resetStringInfo(&buf);
 		initStringInfo(&buf);
 		appendStringInfo(&buf,
-					"update diskquota.quota_config set quotalimitMB = %ld where targetOid=%u;",
-					quota_limit_mb, targetoid);
+					"update diskquota.quota_config set quotalimitMB = %ld where targetoid=%u;"
+					" and quotatype=%d",
+					quota_limit_mb, targetoid, type);
 		ret = SPI_execute(buf.data, false, 0);
 		if (ret != SPI_OK_UPDATE)
 			elog(ERROR, "cannot update quota setting table, error code %d", ret);
