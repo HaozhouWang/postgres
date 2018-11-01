@@ -12,9 +12,9 @@ There are two kinds of background workers: diskquota launcher and diskquota work
 There is only one laucher process per database cluster(i.e. one laucher per postmaster).
 Launcher process is reponsible for manage worker processes: Calling RegisterDynamicBackgroundWorker() 
 to create new workers and keep their handle. Calling TerminateBackgroundWorker() to
-terminate workers which are disabled when DBA modify worker_spi.monitor_databases
+terminate workers which are disabled when DBA modify diskquota.monitor_databases
 
-There are many worker processes, one for each database which is listed in worker_spi.monitor_databases.
+There are many worker processes, one for each database which is listed in diskquota.monitor_databases.
 Currently, we support to monitor at most 10 databases at the same time.
 Worker processes are responsible for monitoring the disk usage of schemas and roles for the target database, 
 and do quota enfocement. It will periodically recalcualte the table size of active tables, and update their corresponding schema or owner's disk usage. Then compare with quota limit for those schemas or roles. If exceeds the limit, put the corresponding schemas or roles into the blacklist in shared memory. Schemas or roles in blacklist are used to do query enforcement to cancel queries which plan to load data into these schemas or roles.
@@ -40,8 +40,8 @@ make install
 # enable disk_quota in preload library.
 shared_preload_libraries = 'disk_quota'
 # set monitored databases and naptime to refresh the disk quota stats.
-worker_spi.monitor_databases = 'postgres'
-worker_spi.naptime = 2
+diskquota.monitor_databases = 'postgres'
+diskquota.naptime = 2
 ```
 3. Create disk_quota extension in monitored database.
 ```
@@ -108,7 +108,7 @@ Without diskquota enabled
 
 If DBA enable monitoring diskquota on a database, there will be a connection
 to this database from diskquota worker process. DBA need to first remove this
-database from worker_spi.monitor_databases in postgres.conf, and reload 
+database from diskquota.monitor_databases in postgres.conf, and reload 
 configuration by call `pg_ctl reload`. Then database could be dropped successfully.
 
 2. Temp table.

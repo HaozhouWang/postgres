@@ -49,7 +49,6 @@
 *
 ******************************************/
 
-PG_FUNCTION_INFO_V1(diskquota_fetch_active_table_stat);
 
 /* cluster level max size of black list */
 #define MAX_DISK_QUOTA_BLACK_ENTRIES 8192 * 1024
@@ -57,11 +56,6 @@ PG_FUNCTION_INFO_V1(diskquota_fetch_active_table_stat);
 #define INIT_DISK_QUOTA_BLACK_ENTRIES 8192
 /* per database level max size of black list */
 #define MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES 8192
-/* initial active table size */
-#define INIT_ACTIVE_TABLE_SIZE	64
-
-
-Datum	diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS);
 
 typedef struct TableSizeEntry TableSizeEntry;
 typedef struct NamespaceSizeEntry NamespaceSizeEntry;
@@ -119,7 +113,7 @@ struct LocalBlackMapEntry
 /*
  * Get active table list to check their size
  */
-static HTAB *active_tables_map = NULL;
+HTAB *active_tables_map = NULL;
 
 /* Cache to detect the active table list */
 typedef struct DiskQuotaActiveTableEntry
@@ -155,15 +149,10 @@ static HTAB *role_quota_limit_map = NULL;
 static HTAB *disk_quota_black_map = NULL;
 static HTAB *local_disk_quota_black_map = NULL;
 
-typedef struct
-{
-	LWLock	   *lock;		/* protects shared memory of blackMap */
-} disk_quota_shared_state;
 static disk_quota_shared_state *shared;
-static disk_quota_shared_state *active_table_shm_lock;
+disk_quota_shared_state *active_table_shm_lock = NULL;
 
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
-static SmgrStat_hook_type prev_SmgrStat_hook = NULL;
 
 /* functions to refresh disk quota model*/
 static void init_shm_worker_active_tables(void);
@@ -181,8 +170,6 @@ static void remove_role_map(Oid owneroid);
 static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
 static HTAB *get_active_table_lists();
 static bool load_quotas(void);
-static void report_active_table_SmgrStat(SMgrRelation reln);
-static HTAB *get_active_tables_shm(Oid databaseID);
 
 static Size DiskQuotaShmemSize(void);
 static void disk_quota_shmem_startup(void);
@@ -729,7 +716,7 @@ DiskQuotaShmemSize(void)
 	size = MAXALIGN(sizeof(disk_quota_shared_state));
 	size = add_size(size, size); // 2 locks
 	size = add_size(size, hash_estimate_size(MAX_DISK_QUOTA_BLACK_ENTRIES, sizeof(BlackMapEntry)));
-	size = add_size(size, hash_estimate_size(worker_spi_max_active_tables, sizeof(DiskQuotaActiveTableEntry)));
+	size = add_size(size, hash_estimate_size(diskquota_max_active_tables, sizeof(DiskQuotaActiveTableEntry)));
 	return size;
 }
 
@@ -804,14 +791,6 @@ init_disk_quota_shmem(void)
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = disk_quota_shmem_startup;
 }
-
-void
-init_disk_quota_hook(void)
-{
-	prev_SmgrStat_hook = SmgrStat_hook;
-	SmgrStat_hook = report_active_table_SmgrStat;
-}
-
 
 /*
  * init disk quota model when the worker process firstly started.
@@ -903,8 +882,8 @@ init_shm_worker_active_tables()
 	ctl.hash = tag_hash;
 
 	active_tables_map = ShmemInitHash ("active_tables",
-				worker_spi_max_active_tables,
-				worker_spi_max_active_tables,
+				diskquota_max_active_tables,
+				diskquota_max_active_tables,
 				&ctl,
 				HASH_ELEM | HASH_FUNCTION);
 
@@ -1000,306 +979,4 @@ quota_check_common(Oid reloid)
 	}
 	LWLockRelease(shared->lock);
 	return true;
-}
-
-Datum
-diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
-{
-	FuncCallContext *funcctx;
-	AttInMetadata *attinmeta;
-	bool isFirstCall = true;
-
-	HTAB *localResultsCacheTable;
-	DiskQuotaSetOFCache *cache;
-	DiskQuotaSizeResultsEntry *results_entry;
-
-	/* Init the container list in the first call and get the results back */
-	if (SRF_IS_FIRSTCALL()) {
-		MemoryContext oldcontext;
-
-		HASHCTL ctl;
-		HTAB *localCacheTable = NULL;
-		HASH_SEQ_STATUS iter;
-		DiskQuotaActiveTableEntry *shmCache_entry;
-		DiskQuotaSizeResultsEntry *sizeResults_entry;
-
-		ScanKeyData relfilenode_skey[2];
-		Relation	relation;
-		HeapTuple	tuple;
-		SysScanDesc relScan;
-		Oid			relOid;
-		TupleDesc tupdesc;
-
-		/* create a function context for cross-call persistence */
-		funcctx = SRF_FIRSTCALL_INIT();
-
-		/* switch to memory context appropriate for multiple function calls */
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-		/* build skey */
-		MemSet(&relfilenode_skey, 0, sizeof(relfilenode_skey));
-
-		for (int i = 0; i < 2; i++)
-		{
-			fmgr_info_cxt(F_OIDEQ,
-			              &relfilenode_skey[i].sk_func,
-			              CacheMemoryContext);
-			relfilenode_skey[i].sk_strategy = BTEqualStrategyNumber;
-			relfilenode_skey[i].sk_subtype = InvalidOid;
-			relfilenode_skey[i].sk_collation = InvalidOid;
-		}
-
-		relfilenode_skey[0].sk_attno = Anum_pg_class_reltablespace;
-		relfilenode_skey[1].sk_attno = Anum_pg_class_relfilenode;
-
-		/* build the result HTAB */
-		memset(&ctl, 0, sizeof(ctl));
-
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(DiskQuotaSizeResultsEntry);
-		ctl.hcxt = funcctx->multi_call_memory_ctx;
-		ctl.hash = oid_hash;
-
-		localResultsCacheTable = hash_create("disk quota Active Table Entry lookup hash table",
-		                                     INIT_ACTIVE_TABLE_SIZE,
-		                                     &ctl,
-		                                     HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
-
-
-		/* Read the SHM and using a local cache to store */
-		localCacheTable = get_active_tables_shm(MyDatabaseId);
-		hash_seq_init(&iter, localCacheTable);
-
-		/* check for plain relations by looking in pg_class */
-		relation = heap_open(RelationRelationId, AccessShareLock);
-
-		/* Scan whole HTAB, get the Oid of each table and calculate the size of them */
-		while ((shmCache_entry = (DiskQuotaActiveTableEntry *) hash_seq_search(&iter)) != NULL)
-		{
-			Size tablesize;
-			bool found;
-			ScanKeyData skey[2];
-
-			/* set scan arguments */
-			memcpy(skey, relfilenode_skey, sizeof(skey));
-			skey[0].sk_argument = ObjectIdGetDatum(shmCache_entry->tablespaceoid);
-			skey[1].sk_argument = ObjectIdGetDatum(shmCache_entry->relfilenode);
-
-			relScan = systable_beginscan(relation,
-			                             ClassTblspcRelfilenodeIndexId,
-			                             true,
-			                             NULL,
-			                             2,
-			                             skey);
-
-			tuple = systable_getnext(relScan);
-
-			if (!HeapTupleIsValid(tuple))
-			{
-
-				systable_endscan(relScan);
-
-				/* tablespace oid may be 0 if the table is in default table space*/
-				memcpy(skey, relfilenode_skey, sizeof(skey));
-				skey[0].sk_argument = ObjectIdGetDatum(0);
-				skey[1].sk_argument = ObjectIdGetDatum(shmCache_entry->relfilenode);
-
-				relScan = systable_beginscan(relation,
-				                             ClassTblspcRelfilenodeIndexId,
-				                             true,
-				                             NULL,
-				                             2,
-				                             skey);
-
-				tuple = systable_getnext(relScan);
-
-				if (!HeapTupleIsValid(tuple))
-				{
-					systable_endscan(relScan);
-					continue;
-				}
-
-			}
-			relOid = HeapTupleGetOid(tuple);
-
-			/* Call function directly to get size of table by oid */
-			tablesize = (Size) DatumGetInt64(DirectFunctionCall1(pg_total_relation_size, ObjectIdGetDatum(relOid)));
-
-			systable_endscan(relScan);
-
-			sizeResults_entry = (DiskQuotaSizeResultsEntry*) hash_search(localResultsCacheTable, &relOid, HASH_ENTER, &found);
-
-			if (!found)
-			{
-				sizeResults_entry->dbid = MyDatabaseId;
-				sizeResults_entry->tablesize = tablesize;
-				sizeResults_entry->tableoid = relOid;
-			}
-
-		}
-
-		heap_close(relation, AccessShareLock);
-
-		/* total number of active tables to be returned, each tuple contains one active table stat */
-		funcctx->max_calls = (uint32) hash_get_num_entries(localResultsCacheTable);
-
-		/*
-		 * prepare attribute metadata for next calls that generate the tuple
-		 */
-
-		tupdesc = CreateTemplateTupleDesc(3, false);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "TABLE_OID",
-		                   OIDOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "DATABASE_ID",
-		                   OIDOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "TABLE_SIZE",
-		                   INT8OID, -1, 0);
-
-		attinmeta = TupleDescGetAttInMetadata(tupdesc);
-		funcctx->attinmeta = attinmeta;
-
-		/* Prepare SetOf results HATB */
-		cache = (DiskQuotaSetOFCache *) palloc(sizeof(DiskQuotaSetOFCache));
-		cache->result = localResultsCacheTable;
-		hash_seq_init(&(cache->pos), localResultsCacheTable);
-
-		/* clean the local cache table */
-		hash_destroy(localCacheTable);
-
-		MemoryContextSwitchTo(oldcontext);
-	} else {
-		isFirstCall = false;
-	}
-
-	funcctx = SRF_PERCALL_SETUP();
-
-	attinmeta = funcctx->attinmeta;
-
-	if (isFirstCall) {
-		funcctx->user_fctx = (void *) cache;
-	} else {
-		cache = (DiskQuotaSetOFCache *) funcctx->user_fctx;
-	}
-
-	/* return the results back to SPI caller */
-	while ((results_entry = (DiskQuotaSizeResultsEntry *) hash_seq_search(&(cache->pos))) != NULL)
-	{
-		Datum result;
-		Datum values[3];
-		bool nulls[3];
-		HeapTuple	tuple;
-
-		memset(values, 0, sizeof(values));
-		memset(nulls, false, sizeof(nulls));
-
-		values[0] = ObjectIdGetDatum(results_entry->tableoid);
-		values[1] = ObjectIdGetDatum(results_entry->dbid);
-		values[2] = Int64GetDatum(results_entry->tablesize);
-
-		tuple = heap_form_tuple(funcctx->attinmeta->tupdesc, values, nulls);
-
-		result = HeapTupleGetDatum(tuple);
-		funcctx->call_cntr++;
-
-		SRF_RETURN_NEXT(funcctx, result);
-	}
-
-	/* finished, do the clear staff */
-	hash_destroy(cache->result);
-	pfree(cache);
-	SRF_RETURN_DONE(funcctx);
-}
-
-/**
- *  Consume hash table in SHM
- **/
-
-static
-HTAB* get_active_tables_shm(Oid databaseID)
-{
-	HASHCTL ctl;
-	HTAB *localHashTable = NULL;
-	HASH_SEQ_STATUS iter;
-	DiskQuotaActiveTableEntry *shmCache_entry;
-	bool found;
-
-	int num = 0;
-
-	memset(&ctl, 0, sizeof(ctl));
-
-	ctl.keysize = sizeof(DiskQuotaActiveTableEntry);
-	ctl.entrysize = sizeof(DiskQuotaActiveTableEntry);
-	ctl.hcxt = CurrentMemoryContext;
-	ctl.hash = tag_hash;
-
-	localHashTable = hash_create("local blackmap whose quota limitation is reached",
-								MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
-								&ctl,
-								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
-
-	//TODO: why init twice??
-	init_shm_worker_active_tables();
-
-	active_table_shm_lock = ShmemInitStruct("disk_quota_active_table_shm_lock",
-							sizeof(disk_quota_shared_state),
-							&found);
-
-	LWLockAcquire(active_table_shm_lock->lock, LW_EXCLUSIVE);
-
-	hash_seq_init(&iter, active_tables_map);
-
-	while ((shmCache_entry = (DiskQuotaActiveTableEntry *) hash_seq_search(&iter)) != NULL)
-	{
-		bool  found;
-		DiskQuotaActiveTableEntry *entry;
-
-		if (shmCache_entry->dbid != databaseID)
-		{
-			continue;
-		}
-
-		/* Add the active table entry into local hash table*/
-		entry = hash_search(localHashTable, shmCache_entry, HASH_ENTER, &found);
-		*entry = *shmCache_entry;
-		hash_search(active_tables_map, shmCache_entry, HASH_REMOVE, NULL);
-		num++;
-	}
-
-	LWLockRelease(active_table_shm_lock->lock);
-
-	elog(DEBUG1, "number of active tables = %d\n", num);
-
-	return localHashTable;
-}
-
-/*
- *  Hook function in smgr to report the active table
- *  information and stroe them in active table shared memory
- *  diskquota worker will consuming these active tables and
- *  recalculate their file size to update diskquota model.
- */
-static void
-report_active_table_SmgrStat(SMgrRelation reln)
-{
-	DiskQuotaActiveTableEntry *entry;
-	DiskQuotaActiveTableEntry item;
-	bool found = false;
-
-	if (prev_SmgrStat_hook)
-		(*prev_SmgrStat_hook)(reln);
-
-	item.dbid = reln->smgr_rnode.node.dbNode;
-	item.relfilenode = reln->smgr_rnode.node.relNode;
-	item.tablespaceoid = reln->smgr_rnode.node.spcNode;
-
-	LWLockAcquire(active_table_shm_lock->lock, LW_EXCLUSIVE);
-	entry = hash_search(active_tables_map, &item, HASH_ENTER_NULL, &found);
-	if (entry && !found)
-		*entry = item;
-	LWLockRelease(active_table_shm_lock->lock);
-
-	if (!found && entry == NULL) {
-		/* We may miss the file size change of this relation at current refresh interval.*/
-		ereport(WARNING, (errmsg("Share memory is not enough for active tables.")));
-	}
 }
