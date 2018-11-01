@@ -5,7 +5,6 @@ This project is inspired by Heikki's pg_quota project (link: https://github.com/
 
 Diskquota is a soft limit of disk uages. It has some delay to detect the schemas or roles whose quota limit is exceeded. Here 'soft limit' support two kinds of encforcement:  Query loading data into out-of-quota schema/role will be forbidden before query is running. Query loading data into schema/role with rooms will be cancelled when the quota limit is reached dynamically during the query is running. 
 
-temp table??
 # Design
 Diskquota extension is based on background worker framework in Postgresql.
 There are two kinds of background workers: diskquota launcher and diskquota worker.
@@ -27,6 +26,7 @@ enforcement during query is running.
 The first one is implemented at ExecCheckPerms
 The second one is implemented at GetBuffer
 
+Quota limit of schema or role is stored in table 'quota_config' in 'diskquota' schema in monitored database. So each database store and manage its own disk quota configuration. Note that although role is a db object in cluster level, we limit the diskquota of a role to be database specific. That is to say, a role may has different quota limit on different databases and their disk usage is isolated between databases.
 
 # Install
 1. Compile and install disk quota.
@@ -119,7 +119,7 @@ table size to its owner's quota. While for schema, temp table is located under n
 so temp table size will not sum to the current schema's qouta.
 
 # Known Issue.
-Since Postgresql doesn't support READ UNCOMMITTED isolation level, 
+1. Since Postgresql doesn't support READ UNCOMMITTED isolation level, 
 our implementation cannot detect the new created table inside an
 uncommitted transaction(See below example). Hence enforcement on 
 that newly created table will not work. After transaction commit,
@@ -145,4 +145,7 @@ for schema and role in worker process. Since pg_total_relation_size need to hold
 AccessShareLock to relation(And worker process don't even know this reloid exists), 
 we need to skip it, and call stat() directly with tolerant to file unlink. 
 Skip lock is dangerous and we plan to leave it as known issue at current stage.
+
+2. Out of shared memory
+Diskquota extension uses two kinds of shared memories. 
 

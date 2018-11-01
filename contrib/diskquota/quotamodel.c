@@ -122,12 +122,12 @@ struct LocalBlackMapEntry
 static HTAB *active_tables_map = NULL;
 
 /* Cache to detect the active table list */
-typedef struct DiskQuotaSHMCache
+typedef struct DiskQuotaActiveTableEntry
 {
 	Oid         dbid;
 	Oid         relfilenode;
 	Oid         tablespaceoid;
-} DiskQuotaSHMCache;
+} DiskQuotaActiveTableEntry;
 
 typedef struct DiskQuotaSizeResultsEntry
 {
@@ -163,7 +163,9 @@ static disk_quota_shared_state *shared;
 static disk_quota_shared_state *active_table_shm_lock;
 
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+static SmgrStat_hook_type prev_SmgrStat_hook = NULL;
 
+/* functions to refresh disk quota model*/
 static void init_shm_worker_active_tables(void);
 static void refresh_disk_quota_usage(bool force);
 static void calculate_table_disk_usage(bool force);
@@ -179,34 +181,12 @@ static void remove_role_map(Oid owneroid);
 static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
 static HTAB *get_active_table_lists();
 static bool load_quotas(void);
-static void report_active_table(SMgrRelation reln);
+static void report_active_table_SmgrStat(SMgrRelation reln);
 static HTAB *get_active_tables_shm(Oid databaseID);
 
 static Size DiskQuotaShmemSize(void);
 static void disk_quota_shmem_startup(void);
 
-static void
-report_active_table(SMgrRelation reln)
-{
-	DiskQuotaSHMCache *entry;
-	DiskQuotaSHMCache item;
-	bool found = false;
-
-	item.dbid = reln->smgr_rnode.node.dbNode;
-	item.relfilenode = reln->smgr_rnode.node.relNode;
-	item.tablespaceoid = reln->smgr_rnode.node.spcNode;
-
-	LWLockAcquire(active_table_shm_lock->lock, LW_EXCLUSIVE);
-	entry = hash_search(active_tables_map, &item, HASH_ENTER_NULL, &found);
-	if (entry && !found)
-		*entry = item;
-	LWLockRelease(active_table_shm_lock->lock);
-
-	if (!found && entry == NULL) {
-		// not enough shm:
-		ereport(WARNING, (errmsg("Share memory is not enough for active tables")));
-	}
-}
 
 /*
  * generate the new shared blacklist from the localblack list which
@@ -749,7 +729,7 @@ DiskQuotaShmemSize(void)
 	size = MAXALIGN(sizeof(disk_quota_shared_state));
 	size = add_size(size, size); // 2 locks
 	size = add_size(size, hash_estimate_size(MAX_DISK_QUOTA_BLACK_ENTRIES, sizeof(BlackMapEntry)));
-	size = add_size(size, hash_estimate_size(worker_spi_max_active_tables, sizeof(DiskQuotaSHMCache)));
+	size = add_size(size, hash_estimate_size(worker_spi_max_active_tables, sizeof(DiskQuotaActiveTableEntry)));
 	return size;
 }
 
@@ -764,7 +744,7 @@ disk_quota_shmem_startup(void)
 	HASHCTL		hash_ctl;
 
 	if (prev_shmem_startup_hook)
-			prev_shmem_startup_hook();
+		(*prev_shmem_startup_hook)();
 
 	shared = NULL;
 	disk_quota_black_map = NULL;
@@ -828,7 +808,8 @@ init_disk_quota_shmem(void)
 void
 init_disk_quota_hook(void)
 {
-	dq_report_hook = report_active_table;
+	prev_SmgrStat_hook = SmgrStat_hook;
+	SmgrStat_hook = report_active_table_SmgrStat;
 }
 
 
@@ -917,8 +898,8 @@ init_shm_worker_active_tables()
 	memset(&ctl, 0, sizeof(ctl));
 
 
-	ctl.keysize = sizeof(DiskQuotaSHMCache);
-	ctl.entrysize = sizeof(DiskQuotaSHMCache);
+	ctl.keysize = sizeof(DiskQuotaActiveTableEntry);
+	ctl.entrysize = sizeof(DiskQuotaActiveTableEntry);
 	ctl.hash = tag_hash;
 
 	active_tables_map = ShmemInitHash ("active_tables",
@@ -1039,7 +1020,7 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 		HASHCTL ctl;
 		HTAB *localCacheTable = NULL;
 		HASH_SEQ_STATUS iter;
-		DiskQuotaSHMCache *shmCache_entry;
+		DiskQuotaActiveTableEntry *shmCache_entry;
 		DiskQuotaSizeResultsEntry *sizeResults_entry;
 
 		ScanKeyData relfilenode_skey[2];
@@ -1093,7 +1074,7 @@ diskquota_fetch_active_table_stat(PG_FUNCTION_ARGS)
 		relation = heap_open(RelationRelationId, AccessShareLock);
 
 		/* Scan whole HTAB, get the Oid of each table and calculate the size of them */
-		while ((shmCache_entry = (DiskQuotaSHMCache *) hash_seq_search(&iter)) != NULL)
+		while ((shmCache_entry = (DiskQuotaActiveTableEntry *) hash_seq_search(&iter)) != NULL)
 		{
 			Size tablesize;
 			bool found;
@@ -1239,15 +1220,15 @@ HTAB* get_active_tables_shm(Oid databaseID)
 	HASHCTL ctl;
 	HTAB *localHashTable = NULL;
 	HASH_SEQ_STATUS iter;
-	DiskQuotaSHMCache *shmCache_entry;
+	DiskQuotaActiveTableEntry *shmCache_entry;
 	bool found;
 
 	int num = 0;
 
 	memset(&ctl, 0, sizeof(ctl));
 
-	ctl.keysize = sizeof(DiskQuotaSHMCache);
-	ctl.entrysize = sizeof(DiskQuotaSHMCache);
+	ctl.keysize = sizeof(DiskQuotaActiveTableEntry);
+	ctl.entrysize = sizeof(DiskQuotaActiveTableEntry);
 	ctl.hcxt = CurrentMemoryContext;
 	ctl.hash = tag_hash;
 
@@ -1267,10 +1248,10 @@ HTAB* get_active_tables_shm(Oid databaseID)
 
 	hash_seq_init(&iter, active_tables_map);
 
-	while ((shmCache_entry = (DiskQuotaSHMCache *) hash_seq_search(&iter)) != NULL)
+	while ((shmCache_entry = (DiskQuotaActiveTableEntry *) hash_seq_search(&iter)) != NULL)
 	{
 		bool  found;
-		DiskQuotaSHMCache *entry;
+		DiskQuotaActiveTableEntry *entry;
 
 		if (shmCache_entry->dbid != databaseID)
 		{
@@ -1289,4 +1270,36 @@ HTAB* get_active_tables_shm(Oid databaseID)
 	elog(DEBUG1, "number of active tables = %d\n", num);
 
 	return localHashTable;
+}
+
+/*
+ *  Hook function in smgr to report the active table
+ *  information and stroe them in active table shared memory
+ *  diskquota worker will consuming these active tables and
+ *  recalculate their file size to update diskquota model.
+ */
+static void
+report_active_table_SmgrStat(SMgrRelation reln)
+{
+	DiskQuotaActiveTableEntry *entry;
+	DiskQuotaActiveTableEntry item;
+	bool found = false;
+
+	if (prev_SmgrStat_hook)
+		(*prev_SmgrStat_hook)(reln);
+
+	item.dbid = reln->smgr_rnode.node.dbNode;
+	item.relfilenode = reln->smgr_rnode.node.relNode;
+	item.tablespaceoid = reln->smgr_rnode.node.spcNode;
+
+	LWLockAcquire(active_table_shm_lock->lock, LW_EXCLUSIVE);
+	entry = hash_search(active_tables_map, &item, HASH_ENTER_NULL, &found);
+	if (entry && !found)
+		*entry = item;
+	LWLockRelease(active_table_shm_lock->lock);
+
+	if (!found && entry == NULL) {
+		/* We may miss the file size change of this relation at current refresh interval.*/
+		ereport(WARNING, (errmsg("Share memory is not enough for active tables.")));
+	}
 }

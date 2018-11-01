@@ -90,7 +90,7 @@ static const f_smgr smgrsw[] = {
 
 static const int NSmgr = lengthof(smgrsw);
 
-dq_report_hook_type dq_report_hook = NULL;
+SmgrStat_hook_type SmgrStat_hook = NULL;
 /*
  * Each backend has a hashtable that stores all extant SMgrRelation objects.
  * In addition, "unowned" SMgrRelation objects are chained together in a list.
@@ -412,7 +412,10 @@ smgrcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 
 	smgrsw[reln->smgr_which].smgr_create(reln, forknum, isRedo);
 
-	DQ_REPORT_ACTIVE_RELATION(reln);
+	if (SmgrStat_hook)
+	{
+		(*SmgrStat_hook)(reln);
+	}
 }
 
 /*
@@ -620,7 +623,10 @@ smgrextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	smgrsw[reln->smgr_which].smgr_extend(reln, forknum, blocknum,
 										 buffer, skipFsync);
 
-	DQ_REPORT_ACTIVE_RELATION(reln);
+	if (SmgrStat_hook)
+	{
+		(*SmgrStat_hook)(reln);
+	}
 }
 
 /*
@@ -725,7 +731,10 @@ smgrtruncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 	 */
 	smgrsw[reln->smgr_which].smgr_truncate(reln, forknum, nblocks);
 
-	DQ_REPORT_ACTIVE_RELATION(reln);
+	if (SmgrStat_hook)
+	{
+		(*SmgrStat_hook)(reln);
+	}
 }
 
 /*
