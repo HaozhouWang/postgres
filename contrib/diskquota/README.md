@@ -80,6 +80,10 @@ insert into b select generate_series(1,10000000);
 insert into b select generate_series(1,100);
 ```
 
+3. Show schema quota limit and current usage
+```
+select diskquota.show_schema_quota();
+```
 # Test
 Run regression tests.
 ```
@@ -99,7 +103,7 @@ With diskquota enabled
 Without diskquota enabled
 
 
-#Notes
+# Notes
 1. Drop database with diskquota enabled.
 
 If DBA enable monitoring diskquota on a database, there will be a connection
