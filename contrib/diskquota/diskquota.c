@@ -17,6 +17,7 @@
 #include "postgres.h"
 
 #include "catalog/namespace.h"
+#include "catalog/pg_collation.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -24,6 +25,7 @@
 #include "storage/ipc.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
+#include "utils/formatting.h"
 #include "utils/numeric.h"
 #include "utils/varlena.h"
 
@@ -528,7 +530,6 @@ set_role_quota(PG_FUNCTION_ARGS)
 	set_quota_internal(roleoid, quota_limit_mb, ROLE_QUOTA);
 	PG_RETURN_VOID();
 }
-
 /*
  * Set disk quota limit for schema.
  */
@@ -547,8 +548,11 @@ set_schema_quota(PG_FUNCTION_ARGS)
 	}
 
 	nspname = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	nspname = str_tolower(nspname, strlen(nspname), DEFAULT_COLLATION_OID);
 	namespaceoid = get_namespace_oid(nspname, false);
+
 	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	sizestr = str_tolower(sizestr, strlen(sizestr),  DEFAULT_COLLATION_OID);
 	quota_limit_mb = get_size_in_mb(sizestr);
 
 	set_quota_internal(namespaceoid, quota_limit_mb, NAMESPACE_QUOTA);
