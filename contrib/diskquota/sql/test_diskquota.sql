@@ -2,8 +2,9 @@ create extension diskquota;
 
 select pg_sleep(1);
 
-\! pg_ctl -D /tmp/pg_diskquota_test/data reload
+\! pg_ctl -D /home/hawu/db_dir/pg_diskquota_test/data reload
 \! cp data/csmall.txt /tmp/csmall.txt
+\! df -h
 select pg_sleep(5);
 
 -- Test schema quota 
@@ -69,6 +70,8 @@ select pg_sleep(5);
 -- expect insert failed after add column
 insert into a2 select generate_series(1,10);
 reset search_path;
+drop table b, b2;
+drop role u1, u2;
 
 -- Test copy
 create schema s3;
@@ -203,6 +206,24 @@ select pg_sleep(5);
 insert into a select generate_series(1,10000);
 reset search_path;
 
+-- Test temp table restrained by role id
+create schema strole;
+create role u3 nologin;
+set search_path to strole;
+select diskquota.set_role_quota('U3', '1MB');
+create table a(i int);
+alter table a owner to u3;
+create temp table ta(i int);
+alter table ta owner to u3;
+-- expected failed: fill temp table
+insert into ta select generate_series(1,100000000);
+-- expected failed: 
+insert into a select generate_series(1,100);
+\! df -h
+drop table ta;
+insert into a select generate_series(1,100);
+
+reset search_path;
 
 drop extension diskquota;
 
