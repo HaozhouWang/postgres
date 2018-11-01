@@ -23,10 +23,25 @@ insert into a2 select generate_series(1,100);
 
 reset search_path;
 
+-- Test alter table set schema
+create schema s2;
+set search_path to s1;
+alter table a set schema s2;
+select pg_sleep(5);
+-- expect insert succeed
+insert into a2 select generate_series(1,20000);
+-- expect insert succeed
+insert into s2.a select generate_series(1,20000);
+reset search_path;
+
+-- ##########################################
 -- Test role quota
 CREATE role u1 NOLOGIN;
+CREATE role u2 NOLOGIN;
 CREATE TABLE b (t text);
 ALTER TABLE b OWNER TO u1;
+CREATE TABLE b2 (t text);
+ALTER TABLE b2 OWNER TO u1;
 
 select diskquota.set_role_quota('u1', '1 MB');
 
@@ -35,15 +50,14 @@ insert into b select generate_series(1,100);
 insert into b select generate_series(1,100000000);
 -- expect insert fail
 insert into b select generate_series(1,100);
-
--- Test alter table set schema
-create schema s2;
-set search_path to s1;
-alter table a set schema s2;
+-- expect insert fail
+insert into b2 select generate_series(1,100);
+alter table b owner to u2;
 select pg_sleep(5);
 -- expect insert succeed
-insert into a2 select generate_series(1,20000);
-reset search_path;
+insert into b select generate_series(1,100);
+-- expect insert succeed
+insert into b2 select generate_series(1,100);
 
 -- Test alter table add column and truncate
 set search_path to s1;
@@ -154,6 +168,41 @@ insert into measurement select generate_series(1,100000000), '2006-02-01' ,1,1;
 -- expect insert fail
 insert into measurement select 1, '2006-02-01' ,1,1;
 reset search_path;
+
+
+-- Test Drop table
+create schema sdrtbl;
+select diskquota.set_schema_quota('sdrtbl', '1 MB');
+set search_path to sdrtbl;
+create table a(i int);
+insert into a select generate_series(1,100);
+-- expect insert fail
+insert into a select generate_series(1,100000000);
+create table a2(i int);
+-- expect insert fail
+insert into a2 select generate_series(1,100);
+drop table a;
+select pg_sleep(5);
+-- expect insert succeed
+insert into a2 select generate_series(1,100);
+reset search_path;
+
+-- Test re-set_schema_quota
+create schema srE;
+select diskquota.set_schema_quota('srE', '1 MB');
+set search_path to srE;
+create table a(i int);
+-- expect insert fail
+insert into a select generate_series(1,100000000);
+-- expect insert fail when exceed quota limit
+insert into a select generate_series(1,10000);
+-- set schema quota larger
+select diskquota.set_schema_quota('srE', '1 GB');
+select pg_sleep(5);
+-- expect insert succeed
+insert into a select generate_series(1,10000);
+reset search_path;
+
 
 drop extension diskquota;
 
