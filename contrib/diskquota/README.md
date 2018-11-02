@@ -112,6 +112,7 @@ Without diskquota enabled (seconds)
 |   25	|   9.909	|   27.175	|   47.996	|  75.688 	|  106.648 	|
 
 With diskquota enabled (seconds)
+
 |   	|   2k	|   4k	|  6k 	|  8k 	|  10k 	|
 |:-:	|:-:	|:-:	|:-:	|:-:	|---	|
 |   5	|   4.135	|  10.641 	| 18.776  	|  28.804 	|   41.740	|
