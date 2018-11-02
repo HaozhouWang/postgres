@@ -526,6 +526,7 @@ set_role_quota(PG_FUNCTION_ARGS)
 	roleoid = get_role_oid(rolname, false);
 	
 	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	sizestr = str_tolower(sizestr, strlen(sizestr), DEFAULT_COLLATION_OID);
 	quota_limit_mb = get_size_in_mb(sizestr);
 
 	set_quota_internal(roleoid, quota_limit_mb, ROLE_QUOTA);

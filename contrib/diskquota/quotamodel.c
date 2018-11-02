@@ -43,7 +43,7 @@
 #include "diskquota.h"
 
 /* cluster level max size of black list */
-#define MAX_DISK_QUOTA_BLACK_ENTRIES 8192 * 1024
+#define MAX_DISK_QUOTA_BLACK_ENTRIES (8192 * 1024)
 /* cluster level init size of black list */
 #define INIT_DISK_QUOTA_BLACK_ENTRIES 8192
 /* per database level max size of black list */
