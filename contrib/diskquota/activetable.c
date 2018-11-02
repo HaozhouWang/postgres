@@ -187,12 +187,18 @@ HTAB* get_active_tables()
 		Size tablesize;
 		bool found;
 		ScanKeyData skey[2];
+		Oid reltablespace;
+		
+		reltablespace = active_table_file_entry->tablespaceoid;
+
+		/* pg_class will show 0 when the value is actually MyDatabaseTableSpace */
+		if (reltablespace == MyDatabaseTableSpace)
+			reltablespace = 0;
 
 		/* set scan arguments */
 		memcpy(skey, relfilenode_skey, sizeof(skey));
-		skey[0].sk_argument = ObjectIdGetDatum(active_table_file_entry->tablespaceoid);
+		skey[0].sk_argument = ObjectIdGetDatum(reltablespace);
 		skey[1].sk_argument = ObjectIdGetDatum(active_table_file_entry->relfilenode);
-		elog(LOG,"hubert%u%u", active_table_file_entry->tablespaceoid, active_table_file_entry->relfilenode);
 		relScan = systable_beginscan(relation,
 		                             ClassTblspcRelfilenodeIndexId,
 		                             true,
@@ -204,30 +210,8 @@ HTAB* get_active_tables()
 
 		if (!HeapTupleIsValid(tuple))
 		{
-
 			systable_endscan(relScan);
-
-			/* tablespace oid may be 0 if the table is in default table space*/
-			memcpy(skey, relfilenode_skey, sizeof(skey));
-			skey[0].sk_argument = ObjectIdGetDatum(0);
-			skey[1].sk_argument = ObjectIdGetDatum(active_table_file_entry->relfilenode);
-
-		elog(LOG,"hubert%u%u", active_table_file_entry->tablespaceoid, active_table_file_entry->relfilenode);
-			relScan = systable_beginscan(relation,
-			                             ClassTblspcRelfilenodeIndexId,
-			                             true,
-			                             NULL,
-			                             2,
-			                             skey);
-
-			tuple = systable_getnext(relScan);
-
-			if (!HeapTupleIsValid(tuple))
-			{
-				systable_endscan(relScan);
-				continue;
-			}
-
+			continue;
 		}
 		relOid = HeapTupleGetOid(tuple);
 
@@ -241,7 +225,7 @@ HTAB* get_active_tables()
 			active_table_entry->tablesize = tablesize;
 		}
 		systable_endscan(relScan);
-		elog(WARNING,"active%u:%ld",relOid, tablesize);
+		elog(DEBUG1,"active%u:%ld",relOid, tablesize);
 	}
 
 	heap_close(relation, AccessShareLock);
