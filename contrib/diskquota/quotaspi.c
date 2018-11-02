@@ -14,32 +14,16 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/htup_details.h"
-#include "access/reloptions.h"
-#include "access/transam.h"
-#include "access/xact.h"
 #include "catalog/indexing.h"
-#include "catalog/namespace.h"
 #include "catalog/pg_class.h"
-#include "catalog/pg_database.h"
 #include "catalog/pg_type.h"
-#include "commands/dbcommands.h"
 #include "executor/spi.h"
 #include "funcapi.h"
-#include "lib/stringinfo.h"
 #include "miscadmin.h"
-#include "nodes/makefuncs.h"
-#include "storage/ipc.h"
-#include "storage/latch.h"
-#include "storage/lwlock.h"
-#include "storage/shmem.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
-#include "utils/lsyscache.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
 
 #include "diskquota.h"
 
@@ -82,7 +66,7 @@ static void report_active_table_SmgrStat(SMgrRelation reln);
 static HTAB *get_active_tables_shm(Oid databaseID);
 
 void
-init_disk_quota_hook(void)
+init_active_table_hook(void)
 {
 	prev_SmgrStat_hook = SmgrStat_hook;
 	SmgrStat_hook = report_active_table_SmgrStat;
@@ -307,8 +291,6 @@ HTAB* get_active_tables_shm(Oid databaseID)
 	HTAB *localHashTable = NULL;
 	HASH_SEQ_STATUS iter;
 	DiskQuotaActiveTableEntry *shmCache_entry;
-	bool found;
-
 	int num = 0;
 
 	memset(&ctl, 0, sizeof(ctl));

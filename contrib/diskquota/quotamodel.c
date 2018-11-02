@@ -19,7 +19,6 @@
 #include "access/reloptions.h"
 #include "access/transam.h"
 #include "access/xact.h"
-#include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
@@ -34,7 +33,6 @@
 #include "storage/latch.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
-#include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
@@ -42,13 +40,6 @@
 #include "utils/syscache.h"
 
 #include "diskquota.h"
-
-/*****************************************
-*
-*  DISK QUOTA HELPER FUNCTIONS
-*
-******************************************/
-
 
 /* cluster level max size of black list */
 #define MAX_DISK_QUOTA_BLACK_ENTRIES 8192 * 1024
@@ -71,6 +62,7 @@ struct TableSizeEntry
 	Oid			namespaceoid;
 	Oid			owneroid;
 	int64		totalsize;
+	bool		exist;
 };
 
 /* local cache of namespace disk size */
@@ -455,7 +447,16 @@ calculate_table_disk_usage(bool force)
 
 	active_table = get_active_table_lists();
 
-
+	/* unset exist flag for tsentry */
+	hash_seq_init(&iter, table_size_map);
+	while ((tsentry = hash_seq_search(&iter)) != NULL)
+	{
+		tsentry->exist = false;
+	}
+	/*
+	 * scan pg_class to detect table event: drop, reset schema, reset owenr
+	 * for active table, also update the file size.
+	 */
 	while ((tuple = heap_getnext(relScan, ForwardScanDirection)) != NULL)
 	{
 		Form_pg_class classForm = (Form_pg_class) GETSTRUCT(tuple);
@@ -472,6 +473,9 @@ calculate_table_disk_usage(bool force)
 		tsentry = (TableSizeEntry *)hash_search(table_size_map,
 							 &relOid,
 							 HASH_ENTER, &found);
+		/* mark tsentry exist */
+		if (tsentry)
+			tsentry->exist = true;
 
 		srentry = (DiskQuotaSizeResultsEntry *) hash_search(active_table, &relOid, HASH_FIND, &active_tbl_found);
 
@@ -532,17 +536,13 @@ calculate_table_disk_usage(bool force)
 
 	heap_endscan(relScan);
 	heap_close(classRel, AccessShareLock);
-
 	hash_destroy(active_table);
 
-	/* Process removed tables*/
+	/* process removed tables */
 	hash_seq_init(&iter, table_size_map);
-
 	while ((tsentry = hash_seq_search(&iter)) != NULL)
 	{
-		/* check if namespace is already be deleted */
-		tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(tsentry->reloid));
-		if (!HeapTupleIsValid(tuple))
+		if (tsentry->exist == false)
 		{
 			update_role_map(tsentry->owneroid, -1 * tsentry->totalsize);
 			update_namespace_map(tsentry->namespaceoid, -1 * tsentry->totalsize);
@@ -552,7 +552,6 @@ calculate_table_disk_usage(bool force)
 					HASH_REMOVE, NULL);
 			continue;
 		}
-		ReleaseSysCache(tuple);
 	}
 }
 
@@ -613,7 +612,6 @@ refresh_disk_quota_usage(bool force)
 	calculate_table_disk_usage(force);
 	calculate_schema_disk_usage();
 	calculate_role_disk_usage();
-
 	flush_local_black_map();
 }
 

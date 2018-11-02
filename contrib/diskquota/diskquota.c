@@ -85,7 +85,7 @@ _PG_init(void)
 
 	init_disk_quota_shmem();
 	init_disk_quota_enforcement();
-	init_disk_quota_hook();
+	init_active_table_hook();
 
 	/* get the configuration */
 	DefineCustomIntVariable("diskquota.naptime",

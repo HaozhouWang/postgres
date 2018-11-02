@@ -22,7 +22,7 @@ extern void init_disk_quota_shmem(void);
 extern void init_disk_quota_model(void);
 extern void refresh_disk_quota_model(bool force);
 extern bool quota_check_common(Oid reloid);
-extern void init_disk_quota_hook(void);
+extern void init_active_table_hook(void);
 
 /* quotaspi interface */
 extern void init_disk_quota_hook(void);
