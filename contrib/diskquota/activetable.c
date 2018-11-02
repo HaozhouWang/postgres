@@ -21,6 +21,7 @@
 #include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "storage/shmem.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -29,9 +30,18 @@
 #include "diskquota.h"
 
 static SmgrStat_hook_type prev_SmgrStat_hook = NULL;
+/* built first time through in InitializeRelfilenodeKey */
+static ScanKeyData relfilenode_skey[2];
+HTAB *active_tables_map = NULL;
+
 
 /* functions to refresh disk quota model*/
 static void report_active_table_SmgrStat(SMgrRelation reln);
+void init_relfilenode_key(void);
+HTAB* get_active_tables(void);
+void init_active_table_hook(void);
+void init_shm_worker_active_tables(void);
+void init_lock_active_tables(void);
 
 void
 init_active_table_hook(void)
@@ -43,21 +53,80 @@ init_active_table_hook(void)
 /*
  *
  */
+void
+init_shm_worker_active_tables(void)
+{
+    HASHCTL ctl;
+    memset(&ctl, 0, sizeof(ctl));
+
+
+    ctl.keysize = sizeof(DiskQuotaActiveTableEntry);
+    ctl.entrysize = sizeof(DiskQuotaActiveTableEntry);
+    ctl.hash = tag_hash;
+
+    active_tables_map = ShmemInitHash ("active_tables",
+                diskquota_max_active_tables,
+                diskquota_max_active_tables,
+                &ctl,
+                HASH_ELEM | HASH_FUNCTION);
+
+}
+
+void init_lock_active_tables(void)
+{
+	bool found = false;
+    active_table_shm_lock = ShmemInitStruct("disk_quota_active_table_shm_lock",
+                                     sizeof(disk_quota_shared_state),
+                                     &found);
+
+    if (!found)
+    {
+        active_table_shm_lock->lock = &(GetNamedLWLockTranche("disk_quota_active_table_shm_lock"))->lock;
+    }
+}
+/*
+ *
+ */
+void
+init_relfilenode_key(void)
+{
+	int			i;
+
+	/* build skey */
+	MemSet(&relfilenode_skey, 0, sizeof(relfilenode_skey));
+
+	for (i = 0; i < 2; i++)
+	{
+		fmgr_info_cxt(F_OIDEQ,
+					  &relfilenode_skey[i].sk_func,
+					  CacheMemoryContext);
+		relfilenode_skey[i].sk_strategy = BTEqualStrategyNumber;
+		relfilenode_skey[i].sk_subtype = InvalidOid;
+		relfilenode_skey[i].sk_collation = InvalidOid;
+	}
+
+	relfilenode_skey[0].sk_attno = Anum_pg_class_reltablespace;
+	relfilenode_skey[1].sk_attno = Anum_pg_class_relfilenode;
+
+}
+
+
+/*
+ *
+ */
 HTAB* get_active_tables()
 {
 	HASHCTL ctl;
-	HTAB *local_active_table_map = NULL;
+	HTAB *local_active_table_file_map = NULL;
 	HTAB *local_active_table_stats_map = NULL;
 	HASH_SEQ_STATUS iter;
 	DiskQuotaActiveTableFileEntry *active_table_file_entry;
 	DiskQuotaActiveTableEntry *active_table_entry;
 
-	ScanKeyData relfilenode_skey[2];
 	Relation relation;
 	HeapTuple tuple;
 	SysScanDesc relScan;
 	Oid relOid;
-	TupleDesc tupdesc;
 
 	memset(&ctl, 0, sizeof(ctl));
 	ctl.keysize = sizeof(DiskQuotaActiveTableFileEntry);
@@ -65,7 +134,7 @@ HTAB* get_active_tables()
 	ctl.hcxt = CurrentMemoryContext;
 	ctl.hash = tag_hash;
 
-	local_active_table_map = hash_create("local active table map with relfilenode info",
+	local_active_table_file_map = hash_create("local active table map with relfilenode info",
 								1024,
 								&ctl,
 								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
@@ -86,7 +155,7 @@ HTAB* get_active_tables()
 		}
 
 		/* Add the active table entry into local hash table*/
-		entry = hash_search(local_active_table_map, active_table_file_entry, HASH_ENTER, &found);
+		entry = hash_search(local_active_table_file_map, active_table_file_entry, HASH_ENTER, &found);
 		if (entry)
 			*entry = *active_table_file_entry;
 		hash_search(active_tables_map, active_table_file_entry, HASH_REMOVE, NULL);
@@ -105,14 +174,15 @@ HTAB* get_active_tables()
 								&ctl,
 								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
+
 	/* traverse local active table map and calculate their file size. */
-	hash_seq_init(&iter, local_active_table_map);
+	hash_seq_init(&iter, local_active_table_file_map);
 
 	/* check for plain relations by looking in pg_class */
 	relation = heap_open(RelationRelationId, AccessShareLock);
 
 	/* Scan whole HTAB, get the Oid of each table and calculate the size of them */
-	while ((active_table_entry = (DiskQuotaActiveTableEntry *) hash_seq_search(&iter)) != NULL)
+	while ((active_table_file_entry = (DiskQuotaActiveTableFileEntry *) hash_seq_search(&iter)) != NULL)
 	{
 		Size tablesize;
 		bool found;
@@ -122,7 +192,7 @@ HTAB* get_active_tables()
 		memcpy(skey, relfilenode_skey, sizeof(skey));
 		skey[0].sk_argument = ObjectIdGetDatum(active_table_file_entry->tablespaceoid);
 		skey[1].sk_argument = ObjectIdGetDatum(active_table_file_entry->relfilenode);
-
+		elog(LOG,"hubert%u%u", active_table_file_entry->tablespaceoid, active_table_file_entry->relfilenode);
 		relScan = systable_beginscan(relation,
 		                             ClassTblspcRelfilenodeIndexId,
 		                             true,
@@ -142,6 +212,7 @@ HTAB* get_active_tables()
 			skey[0].sk_argument = ObjectIdGetDatum(0);
 			skey[1].sk_argument = ObjectIdGetDatum(active_table_file_entry->relfilenode);
 
+		elog(LOG,"hubert%u%u", active_table_file_entry->tablespaceoid, active_table_file_entry->relfilenode);
 			relScan = systable_beginscan(relation,
 			                             ClassTblspcRelfilenodeIndexId,
 			                             true,
@@ -170,10 +241,11 @@ HTAB* get_active_tables()
 			active_table_entry->tablesize = tablesize;
 		}
 		systable_endscan(relScan);
+		elog(WARNING,"active%u:%ld",relOid, tablesize);
 	}
 
 	heap_close(relation, AccessShareLock);
-	hash_destroy(local_active_table_map);
+	hash_destroy(local_active_table_file_map);
 
 	return local_active_table_stats_map;
 }

@@ -30,7 +30,4 @@ extern int   diskquota_naptime;
 extern char *diskquota_monitored_database_list;
 extern int   diskquota_max_active_tables;
 
-extern disk_quota_shared_state *active_table_shm_lock;
-extern HTAB *active_tables_map;
-
 #endif

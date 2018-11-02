@@ -103,12 +103,6 @@ struct LocalBlackMapEntry
 	bool		isexceeded;
 };
 
-/*
- * Get active table list to check their size
- */
-HTAB *active_tables_map = NULL;
-
-
 /* using hash table to support incremental update the table size entry.*/
 static HTAB *table_size_map = NULL;
 static HTAB *namespace_size_map = NULL;
@@ -126,7 +120,6 @@ disk_quota_shared_state *active_table_shm_lock = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 /* functions to refresh disk quota model*/
-static void init_shm_worker_active_tables(void);
 static void refresh_disk_quota_usage(bool force);
 static void calculate_table_disk_usage(bool force);
 static void calculate_schema_disk_usage(void);
@@ -661,15 +654,7 @@ disk_quota_shmem_startup(void)
 		shared->lock = &(GetNamedLWLockTranche("disk_quota"))->lock;
 	}
 
-	active_table_shm_lock = ShmemInitStruct("disk_quota_active_table_shm_lock",
-									 sizeof(disk_quota_shared_state),
-									 &found);
-
-	if (!found)
-	{
-		active_table_shm_lock->lock = &(GetNamedLWLockTranche("disk_quota_active_table_shm_lock"))->lock;
-
-	}
+	init_lock_active_tables();
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
@@ -780,26 +765,7 @@ init_disk_quota_model(void)
 									MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
 									&hash_ctl,
 									HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
-}
-
-/* TODO: init SHM active tables*/
-static void
-init_shm_worker_active_tables()
-{
-	HASHCTL ctl;
-	memset(&ctl, 0, sizeof(ctl));
-
-
-	ctl.keysize = sizeof(DiskQuotaActiveTableEntry);
-	ctl.entrysize = sizeof(DiskQuotaActiveTableEntry);
-	ctl.hash = tag_hash;
-
-	active_tables_map = ShmemInitHash ("active_tables",
-				diskquota_max_active_tables,
-				diskquota_max_active_tables,
-				&ctl,
-				HASH_ELEM | HASH_FUNCTION);
-
+	init_relfilenode_key();
 }
 
 void
