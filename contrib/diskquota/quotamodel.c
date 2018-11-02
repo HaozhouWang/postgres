@@ -39,6 +39,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
+#include "activetable.h"
 #include "diskquota.h"
 
 /* cluster level max size of black list */
@@ -107,28 +108,6 @@ struct LocalBlackMapEntry
  */
 HTAB *active_tables_map = NULL;
 
-/* Cache to detect the active table list */
-typedef struct DiskQuotaActiveTableEntry
-{
-	Oid         dbid;
-	Oid         relfilenode;
-	Oid         tablespaceoid;
-} DiskQuotaActiveTableEntry;
-
-typedef struct DiskQuotaSizeResultsEntry
-{
-	Oid     tableoid;
-	Oid     dbid;
-	Size    tablesize;
-} DiskQuotaSizeResultsEntry;
-
-/* The results set cache for SRF call*/
-typedef struct DiskQuotaSetOFCache
-{
-	HTAB                *result;
-	HASH_SEQ_STATUS     pos;
-} DiskQuotaSetOFCache;
-
 
 /* using hash table to support incremental update the table size entry.*/
 static HTAB *table_size_map = NULL;
@@ -159,8 +138,6 @@ static void update_namespace_map(Oid namespaceoid, int64 updatesize);
 static void update_role_map(Oid owneroid, int64 updatesize);
 static void remove_namespace_map(Oid namespaceoid);
 static void remove_role_map(Oid owneroid);
-static void get_rel_owner_schema(Oid relid, Oid *ownerOid, Oid *nsOid);
-static HTAB *get_active_table_lists();
 static bool load_quotas(void);
 
 static Size DiskQuotaShmemSize(void);
@@ -358,63 +335,6 @@ update_role_map(Oid owneroid, int64 updatesize)
 
 }
 
-static HTAB* get_active_table_lists(void)
-{
-	int ret;
-	StringInfoData buf;
-	HTAB *active_table;
-	HASHCTL ctl;
-
-
-	memset(&ctl, 0, sizeof(ctl));
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(DiskQuotaSizeResultsEntry);
-	ctl.hash = oid_hash;
-	ctl.hcxt = CurrentMemoryContext;
-
-	initStringInfo(&buf);
-	appendStringInfo(&buf, "select * from diskquota.diskquota_fetch_active_table_stat();");
-
-	active_table = hash_create("Active Table List Map for SPI",
-									1024,
-									&ctl,
-									HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
-
-	ret = SPI_execute(buf.data, false, 0);
-
-	if (ret != SPI_OK_SELECT)
-		elog(WARNING, "cannot get table size %u error code", ret);
-	elog(LOG, "active table number: %lu",SPI_processed);
-	for (int i = 0; i < SPI_processed; i++)
-	{
-		bool isnull;
-		bool found;
-		DiskQuotaSizeResultsEntry *entry;
-		Oid tableOid;
-
-		tableOid = DatumGetObjectId(SPI_getbinval(SPI_tuptable->vals[i],
-												  SPI_tuptable->tupdesc,
-												  1, &isnull));
-
-		entry = (DiskQuotaSizeResultsEntry *) hash_search(active_table, &tableOid, HASH_ENTER, &found);
-
-		if (!found)
-		{
-			entry->tableoid = tableOid;
-			entry->dbid = DatumGetObjectId(SPI_getbinval(SPI_tuptable->vals[i],
-													  SPI_tuptable->tupdesc,
-													  2, &isnull));
-			entry->tablesize = (Size) DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
-															  SPI_tuptable->tupdesc,
-															  3, &isnull));
-		}
-
-
-	}
-
-	return active_table;
-}
-
 /*
  *  Incremental way to update the disk quota of every database objects
  *  Recalculate the table's disk usage when it's a new table or be update.
@@ -434,18 +354,13 @@ calculate_table_disk_usage(bool force)
 	TableSizeEntry *tsentry;
 	Oid			relOid;
 	HASH_SEQ_STATUS iter;
-	HTAB *active_table;
-	DiskQuotaSizeResultsEntry *srentry;
+	HTAB *local_active_table_stat_map;
+	DiskQuotaActiveTableEntry *active_table_entry;
 
 	classRel = heap_open(RelationRelationId, AccessShareLock);
 	relScan = heap_beginscan_catalog(classRel, 0, NULL);
 
-	/* call SPI to fetch active table size info as a tuple list(setof)
-	 * insert tuple into active table hash map
-	 * call clear and build_active_hash_map oid->size
-	 * */
-
-	active_table = get_active_table_lists();
+	local_active_table_stat_map = get_active_tables();
 
 	/* unset exist flag for tsentry */
 	hash_seq_init(&iter, table_size_map);
@@ -477,7 +392,7 @@ calculate_table_disk_usage(bool force)
 		if (tsentry)
 			tsentry->exist = true;
 
-		srentry = (DiskQuotaSizeResultsEntry *) hash_search(active_table, &relOid, HASH_FIND, &active_tbl_found);
+		active_table_entry = (DiskQuotaActiveTableEntry *) hash_search(local_active_table_stat_map, &relOid, HASH_FIND, &active_tbl_found);
 
 		/* skip to recalculate the tables which are not in active list.*/
 		if(active_tbl_found || force)
@@ -492,7 +407,7 @@ calculate_table_disk_usage(bool force)
 				tsentry->owneroid = classForm->relowner;
 				if (!force)
 				{
-					tsentry->totalsize = (int64) srentry->tablesize;
+					tsentry->totalsize = (int64) active_table_entry->tablesize;
 				}
 				else
 				{
@@ -509,7 +424,7 @@ calculate_table_disk_usage(bool force)
 			{
 				/* if table size is modified*/
 				int64 oldtotalsize = tsentry->totalsize;
-				tsentry->totalsize = (int64) srentry->tablesize;
+				tsentry->totalsize = (int64) active_table_entry->tablesize;
 
 				elog(DEBUG1, "table: %u, size: %ld", tsentry->reloid, (int64)tsentry->totalsize);
 
@@ -536,7 +451,7 @@ calculate_table_disk_usage(bool force)
 
 	heap_endscan(relScan);
 	heap_close(classRel, AccessShareLock);
-	hash_destroy(active_table);
+	hash_destroy(local_active_table_stat_map);
 
 	/* process removed tables */
 	hash_seq_init(&iter, table_size_map);

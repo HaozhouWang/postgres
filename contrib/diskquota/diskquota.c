@@ -27,6 +27,7 @@
 #include "utils/numeric.h"
 #include "utils/varlena.h"
 
+#include "activetable.h"
 #include "diskquota.h"
 PG_MODULE_MAGIC;
 
