@@ -98,10 +98,29 @@ make installcheck
 100K user tables with 1K active tables.
 
 ## Impact on OLTP queries
-We test OLTP queries to measure the impact of enabling diskquota feature.
-With diskquota enabled
-Without diskquota enabled
+We test OLTP queries to measure the impact of enabling diskquota feature. The range is from 2k tables to 10k tables.
+Each connection will insert 100 rows into each table. And the parallel connections range is from 5 to 25. Number of active tables will be around 1k.
 
+Without diskquota enabled (seconds)
+
+|   	|   2k	|   4k	|  6k 	|  8k 	|  10k 	|
+|:-:	|:-:	|:-:	|:-:	|:-:	|---	|
+|   5	| 4.002 | 11.356	|   18.460	|   28.591	|   41.123	|
+|   10	|   4.832	|   11.988	|  21.113 	|  32.829 	|  45.832 	|
+|   15	|   6.238	|  16.896 	|  28.722 	|   45.375	|   64.642	|
+|   20	|   8.036	|  21.711	|  38.499 	|  61.763 	|   87.875	|
+|   25	|   9.909	|   27.175	|   47.996	|  75.688 	|  106.648 	|
+
+With diskquota enabled (seconds)
+|   	|   2k	|   4k	|  6k 	|  8k 	|  10k 	|
+|:-:	|:-:	|:-:	|:-:	|:-:	|---	|
+|   5	|   4.135	|  10.641 	| 18.776  	|  28.804 	|   41.740	|
+|   10	|   4.773	|   12.407	| 22.351	|  34.243 	|   47.568	|
+|   15	|   6.355	|   17.305	| 30.941  	|  46.967 	|   66.216	|
+|   20	|   9.451	|   22.231	| 40.645  	|  61.758 	|   88.309	|
+|   25	|   10.096	|   26.844	| 48.910  	|   76.537	|   108.025	|
+
+The performance difference between with/without diskquota enabled are less then 2-3% in most case. Therefore, there is no significant performance downgrade when diskquota is enabled.
 
 # Notes
 1. Drop database with diskquota enabled.
