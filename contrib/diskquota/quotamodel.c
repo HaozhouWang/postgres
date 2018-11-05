@@ -90,17 +90,16 @@ struct QuotaLimitEntry
 /* global blacklist for which exceed their quota limit */
 struct BlackMapEntry
 {
-	Oid 		targetoid;
-	Oid		databaseoid;
+	Oid			targetoid;
+	Oid			databaseoid;
+	uint32		targettype;
 };
-
-typedef struct ActiveTableEntry ActiveTableEntry;
 
 /* local blacklist for which exceed their quota limit */
 struct LocalBlackMapEntry
 {
-	Oid 		targetoid;
-	bool		isexceeded;
+	BlackMapEntry	keyitem;
+	bool			isexceeded;
 };
 
 /* using hash table to support incremental update the table size entry.*/
@@ -182,14 +181,15 @@ disk_quota_shmem_startup(void)
 	init_lock_active_tables();
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
-	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.keysize = sizeof(BlackMapEntry);
 	hash_ctl.entrysize = sizeof(BlackMapEntry);
-	hash_ctl.dsize = hash_ctl.max_dsize = hash_select_dirsize(MAX_DISK_QUOTA_BLACK_ENTRIES);
+	hash_ctl.hash = tag_hash;
+
 	disk_quota_black_map = ShmemInitHash("blackmap whose quota limitation is reached",
 									INIT_DISK_QUOTA_BLACK_ENTRIES,
 									MAX_DISK_QUOTA_BLACK_ENTRIES,
 									&hash_ctl,
-									HASH_DIRSIZE | HASH_SHARED_MEM | HASH_ALLOC | HASH_ELEM);
+									HASH_ELEM | HASH_FUNCTION);
 
 	init_shm_worker_active_tables();
 
@@ -275,10 +275,10 @@ init_disk_quota_model(void)
 								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 	
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
-	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.keysize = sizeof(BlackMapEntry);
 	hash_ctl.entrysize = sizeof(LocalBlackMapEntry);
 	hash_ctl.hcxt = CurrentMemoryContext;
-	hash_ctl.hash = oid_hash;
+	hash_ctl.hash = tag_hash;
 
 	local_disk_quota_black_map = hash_create("local blackmap whose quota limitation is reached",
 									MAX_LOCAL_DISK_QUOTA_BLACK_ENTRIES,
@@ -348,7 +348,7 @@ flush_local_black_map(void)
 		if (localblackentry->isexceeded)
 		{
 			blackentry = (BlackMapEntry*) hash_search(disk_quota_black_map,
-							   (void *) &localblackentry->targetoid,
+							   (void *) &localblackentry->keyitem,
 							   HASH_ENTER_NULL, &found);
 			if (blackentry == NULL)
 			{
@@ -359,8 +359,9 @@ flush_local_black_map(void)
 				/* new db objects which exceed quota limit */
 				if (!found)
 				{
-					blackentry->targetoid = localblackentry->targetoid;
+					blackentry->targetoid = localblackentry->keyitem.targetoid;
 					blackentry->databaseoid = MyDatabaseId;
+					blackentry->targettype = localblackentry->keyitem.targettype;
 				}
 			}
 		}
@@ -368,7 +369,7 @@ flush_local_black_map(void)
 		{
 			/* db objects are removed or under quota limit in the new loop */
 			(void) hash_search(disk_quota_black_map,
-							   (void *) &localblackentry->targetoid,
+							   (void *) &localblackentry->keyitem,
 							   HASH_REMOVE, NULL);
 		}
 	}
@@ -389,7 +390,7 @@ reset_local_black_map(void)
 	while ((localblackentry = hash_seq_search(&iter)) != NULL)
 	{
 		(void) hash_search(local_disk_quota_black_map,
-				(void *) &localblackentry->targetoid,
+				(void *) &localblackentry->keyitem,
 				HASH_REMOVE, NULL);
 	}
 
@@ -402,11 +403,10 @@ reset_local_black_map(void)
 		if (blackentry->databaseoid == MyDatabaseId)
 		{
 			localblackentry = (LocalBlackMapEntry*) hash_search(local_disk_quota_black_map,
-								(void *) &blackentry->targetoid,
+								(void *) blackentry,
 								HASH_ENTER, &found);
 			if (!found)
 			{
-				localblackentry->targetoid = blackentry->targetoid;
 				localblackentry->isexceeded = false;
 			}
 		}
@@ -424,7 +424,8 @@ static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, QuotaTyp
 	bool					found;
 	int32 					quota_limit_mb;
 	int32 					current_usage_mb;
-	LocalBlackMapEntry*	localblackentry;
+	LocalBlackMapEntry*		localblackentry;
+	BlackMapEntry 			keyitem;
 
 	QuotaLimitEntry* quota_entry;
 	if (type == NAMESPACE_QUOTA)
@@ -455,10 +456,14 @@ static void check_disk_quota_by_oid(Oid targetOid, int64 current_usage, QuotaTyp
 	current_usage_mb = current_usage / (1024 *1024);
 	if(current_usage_mb >= quota_limit_mb)
 	{
+		memset(&keyitem, 0, sizeof(BlackMapEntry));
+		keyitem.targetoid = targetOid;
+		keyitem.databaseoid = MyDatabaseId;
+		keyitem.targettype = (uint32)type;
 		elog(DEBUG1,"Put object %u to blacklist with quota limit:%d, current usage:%d",
 				targetOid, quota_limit_mb, current_usage_mb);
 		localblackentry = (LocalBlackMapEntry*) hash_search(local_disk_quota_black_map,
-					&targetOid,
+					&keyitem,
 					HASH_ENTER, &found);
 		localblackentry->isexceeded = true;
 	}
@@ -832,14 +837,18 @@ quota_check_common(Oid reloid)
 	Oid ownerOid = InvalidOid;
 	Oid nsOid = InvalidOid;
 	bool found;
-
+	BlackMapEntry keyitem;
+	memset(&keyitem, 0, sizeof(BlackMapEntry));
 	get_rel_owner_schema(reloid, &ownerOid, &nsOid);
 	LWLockAcquire(black_map_shm_lock->lock, LW_SHARED);
 
 	if ( nsOid != InvalidOid)
 	{
+		keyitem.targetoid = nsOid;
+		keyitem.databaseoid = MyDatabaseId;
+		keyitem.targettype = NAMESPACE_QUOTA;
 		hash_search(disk_quota_black_map,
-				&nsOid,
+				&keyitem,
 				HASH_FIND, &found);
 		if (found)
 		{
@@ -853,8 +862,11 @@ quota_check_common(Oid reloid)
 
 	if ( ownerOid != InvalidOid)
 	{
+		keyitem.targetoid = ownerOid;
+		keyitem.databaseoid = MyDatabaseId;
+		keyitem.targettype = ROLE_QUOTA;
 		hash_search(disk_quota_black_map,
-				&ownerOid,
+				&keyitem,
 				HASH_FIND, &found);
 		if (found)
 		{
