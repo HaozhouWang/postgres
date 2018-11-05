@@ -31,13 +31,13 @@ static BufferExtendCheckPerms_hook_type prev_BufferExtendCheckPerms_hook;
 void
 init_disk_quota_enforcement(void)
 {
-    /* enforcement hook before query is loading data */
-    prev_ExecutorCheckPerms_hook = ExecutorCheckPerms_hook;
-    ExecutorCheckPerms_hook = quota_check_ExecCheckRTPerms;
+	/* enforcement hook before query is loading data */
+	prev_ExecutorCheckPerms_hook = ExecutorCheckPerms_hook;
+	ExecutorCheckPerms_hook = quota_check_ExecCheckRTPerms;
 
-    /* enforcement hook during query is loading data*/
-    prev_BufferExtendCheckPerms_hook = BufferExtendCheckPerms_hook;
-    BufferExtendCheckPerms_hook = quota_check_ReadBufferExtendCheckPerms;
+	/* enforcement hook during query is loading data*/
+	prev_BufferExtendCheckPerms_hook = BufferExtendCheckPerms_hook;
+	BufferExtendCheckPerms_hook = quota_check_ReadBufferExtendCheckPerms;
 }
 
 /*
@@ -92,6 +92,4 @@ quota_check_ReadBufferExtendCheckPerms(Oid reloid, BlockNumber blockNum)
 	quota_check_common(reloid);
 	return true;
 }
-
-
 

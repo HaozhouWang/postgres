@@ -37,7 +37,6 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(set_schema_quota);
 PG_FUNCTION_INFO_V1(set_role_quota);
 
-
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
 static volatile sig_atomic_t got_sigterm = false;
@@ -72,7 +71,6 @@ static int64 get_size_in_mb(char *str);
 static void refresh_worker_list(void);
 static void set_quota_internal(Oid targetoid, int64 quota_limit_mb, QuotaType type);
 static int start_worker(char* dbname);
-
 
 /*
  * Entrypoint of diskquota module.
@@ -121,7 +119,7 @@ _PG_init(void)
 							"max number of active tables monitored by disk-quota",
 							NULL,
 							&diskquota_max_active_tables,
-							8 * 1024 * 10,
+							1 * 1024 * 1024,
 							1,
 							INT_MAX,
 							PGC_SIGHUP,
@@ -248,8 +246,6 @@ disk_quota_worker_main(Datum main_arg)
 	proc_exit(1);
 }
 
-
-
 /* ---- Functions for lancher process ---- */
 /*
  * Launcher process manages the worker processes based on
@@ -313,8 +309,8 @@ disk_quota_launcher_main(Datum main_arg)
 		 * background process goes away immediately in an emergency.
 		 */
 		rc = WaitLatch(&MyProc->procLatch,
-					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   diskquota_naptime * 1000L, PG_WAIT_EXTENSION);
+						WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+						diskquota_naptime * 1000L, PG_WAIT_EXTENSION);
 		ResetLatch(&MyProc->procLatch);
 
 		/* emergency bailout if postmaster has died */
@@ -419,8 +415,8 @@ refresh_worker_list(void)
 		db_name = (char *)lfirst(removed_workercell);
 
 		workerentry = (DiskQuotaWorkerEntry *)hash_search(disk_quota_worker_map,
-					(void *)db_name,
-					HASH_REMOVE, &found);
+															(void *)db_name,
+															HASH_REMOVE, &found);
 		if(found)
 		{
 			handle = workerentry->handle;
@@ -444,8 +440,8 @@ refresh_worker_list(void)
 			continue;
 		}
 		workerentry = (DiskQuotaWorkerEntry *)hash_search(disk_quota_worker_map,
-							(void *)db_name,
-							HASH_FIND, &found);
+															(void *)db_name,
+															HASH_FIND, &found);
 		if (found)
 		{
 			/* in case worker is not in BGWH_STARTED mode, restart it. */
@@ -501,8 +497,8 @@ start_worker(char* dbname)
 
 	/* put the worker handle into the worker map */
 	workerentry = (DiskQuotaWorkerEntry *)hash_search(disk_quota_worker_map,
-				(void *)dbname,
-				HASH_ENTER, &found);
+														(void *)dbname,
+														HASH_ENTER, &found);
 	if (!found)
 	{
 		workerentry->handle = handle;
@@ -533,7 +529,7 @@ set_role_quota(PG_FUNCTION_ARGS)
 	rolname = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	rolname = str_tolower(rolname, strlen(rolname), DEFAULT_COLLATION_OID);
 	roleoid = get_role_oid(rolname, false);
-	
+
 	sizestr = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	sizestr = str_tolower(sizestr, strlen(sizestr), DEFAULT_COLLATION_OID);
 	quota_limit_mb = get_size_in_mb(sizestr);
@@ -541,6 +537,7 @@ set_role_quota(PG_FUNCTION_ARGS)
 	set_quota_internal(roleoid, quota_limit_mb, ROLE_QUOTA);
 	PG_RETURN_VOID();
 }
+
 /*
  * Set disk quota limit for schema.
  */
@@ -587,7 +584,7 @@ set_quota_internal(Oid targetoid, int64 quota_limit_mb, QuotaType type)
 					targetoid, type);
 
 	SPI_connect();
-	
+
 	ret = SPI_execute(buf.data, false, 0);
 	if (ret != SPI_OK_SELECT)
 		elog(ERROR, "cannot select quota setting table: error code %d", ret);
@@ -641,8 +638,7 @@ set_quota_internal(Oid targetoid, int64 quota_limit_mb, QuotaType type)
 static int64
 get_size_in_mb(char *str)
 {
-	char		*strptr,
-			*endptr;
+	char		*strptr, *endptr;
 	char		saved_char;
 	Numeric	num;
 	int64	result;

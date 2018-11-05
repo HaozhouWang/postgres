@@ -55,18 +55,18 @@ init_active_table_hook(void)
 void
 init_shm_worker_active_tables(void)
 {
-    HASHCTL ctl;
-    memset(&ctl, 0, sizeof(ctl));
+	HASHCTL ctl;
+	memset(&ctl, 0, sizeof(ctl));
 
-    ctl.keysize = sizeof(DiskQuotaActiveTableEntry);
-    ctl.entrysize = sizeof(DiskQuotaActiveTableEntry);
-    ctl.hash = tag_hash;
+	ctl.keysize = sizeof(DiskQuotaActiveTableEntry);
+	ctl.entrysize = sizeof(DiskQuotaActiveTableEntry);
+	ctl.hash = tag_hash;
 
-    active_tables_map = ShmemInitHash ("active_tables",
-                diskquota_max_active_tables,
-                diskquota_max_active_tables,
-                &ctl,
-                HASH_ELEM | HASH_FUNCTION);
+	active_tables_map = ShmemInitHash ("active_tables",
+										diskquota_max_active_tables,
+										diskquota_max_active_tables,
+										&ctl,
+										HASH_ELEM | HASH_FUNCTION);
 }
 
 /*
@@ -75,14 +75,14 @@ init_shm_worker_active_tables(void)
 void init_lock_active_tables(void)
 {
 	bool found = false;
-    active_table_shm_lock = ShmemInitStruct("disk_quota_active_table_shm_lock",
-                                     sizeof(disk_quota_shared_state),
-                                     &found);
+	active_table_shm_lock = ShmemInitStruct("disk_quota_active_table_shm_lock",
+											sizeof(disk_quota_shared_state),
+											&found);
 
-    if (!found)
-    {
-        active_table_shm_lock->lock = &(GetNamedLWLockTranche("disk_quota_active_table_shm_lock"))->lock;
-    }
+	if (!found)
+	{
+		active_table_shm_lock->lock = &(GetNamedLWLockTranche("disk_quota_active_table_shm_lock"))->lock;
+	}
 }
 
 /*
@@ -178,7 +178,6 @@ HTAB* get_active_tables()
 								&ctl,
 								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
-
 	relation = heap_open(RelationRelationId, AccessShareLock);
 	/* traverse local active table map and calculate their file size. */
 	hash_seq_init(&iter, local_active_table_file_map);
@@ -201,11 +200,11 @@ HTAB* get_active_tables()
 		skey[0].sk_argument = ObjectIdGetDatum(reltablespace);
 		skey[1].sk_argument = ObjectIdGetDatum(active_table_file_entry->relfilenode);
 		relScan = systable_beginscan(relation,
-		                             ClassTblspcRelfilenodeIndexId,
-		                             true,
-		                             NULL,
-		                             2,
-		                             skey);
+									ClassTblspcRelfilenodeIndexId,
+									true,
+									NULL,
+									2,
+									skey);
 
 		tuple = systable_getnext(relScan);
 

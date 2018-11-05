@@ -43,7 +43,7 @@
 #include "diskquota.h"
 
 /* cluster level max size of black list */
-#define MAX_DISK_QUOTA_BLACK_ENTRIES (8192 * 1024)
+#define MAX_DISK_QUOTA_BLACK_ENTRIES (1024 * 1024)
 /* cluster level init size of black list */
 #define INIT_DISK_QUOTA_BLACK_ENTRIES 8192
 /* per database level max size of black list */
@@ -215,7 +215,6 @@ init_disk_quota_shmem(void)
 	shmem_startup_hook = disk_quota_shmem_startup;
 }
 
-
 /*
  * Init disk quota model when the worker process firstly started.
  */
@@ -223,7 +222,7 @@ void
 init_disk_quota_model(void)
 {
 	HASHCTL		hash_ctl;
-	
+
 	/* init hash table for table/schema/role etc.*/
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
@@ -273,7 +272,7 @@ init_disk_quota_model(void)
 								1024,
 								&hash_ctl,
 								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
-	
+
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(BlackMapEntry);
 	hash_ctl.entrysize = sizeof(LocalBlackMapEntry);
@@ -733,6 +732,7 @@ load_quotas(void)
 	int			i;
 	bool		found;
 	QuotaLimitEntry* quota_entry;
+	HASH_SEQ_STATUS iter;
 
 	RangeVar   *rv;
 	Relation	rel;
@@ -748,6 +748,23 @@ load_quotas(void)
 		return false;
 	}
 	heap_close(rel, NoLock);
+
+	/* clear entries in quota limit map*/
+	hash_seq_init(&iter, namespace_quota_limit_map);
+	while ((quota_entry = hash_seq_search(&iter)) != NULL)
+	{
+		(void) hash_search(namespace_quota_limit_map,
+				(void *) &quota_entry->targetoid,
+				HASH_REMOVE, NULL);
+	}
+
+	hash_seq_init(&iter, role_quota_limit_map);
+	while ((quota_entry = hash_seq_search(&iter)) != NULL)
+	{
+		(void) hash_search(role_quota_limit_map,
+				(void *) &quota_entry->targetoid,
+				HASH_REMOVE, NULL);
+	}
 
 	ret = SPI_execute("select targetoid, quotatype, quotalimitMB from diskquota.quota_config", true, 0);
 	if (ret != SPI_OK_SELECT)
@@ -879,3 +896,4 @@ quota_check_common(Oid reloid)
 	LWLockRelease(black_map_shm_lock->lock);
 	return true;
 }
+
