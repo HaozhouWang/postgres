@@ -1,14 +1,13 @@
 /* -------------------------------------------------------------------------
  *
- * quotamodel.c
+ * activetable.c
  *
- * This code is responsible for init disk quota model and refresh disk quota 
- * model.
+ * This code is responsible for detecting active table for databases
  *
  * Copyright (C) 2013, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *		contrib/diskquota/quotamodel.c
+ *		contrib/diskquota/activetable.c
  *
  * -------------------------------------------------------------------------
  */
@@ -29,20 +28,20 @@
 #include "activetable.h"
 #include "diskquota.h"
 
-static SmgrStat_hook_type prev_SmgrStat_hook = NULL;
-/* built first time through in InitializeRelfilenodeKey */
-static ScanKeyData relfilenode_skey[2];
 HTAB *active_tables_map = NULL;
+static SmgrStat_hook_type prev_SmgrStat_hook = NULL;
+static ScanKeyData relfilenode_skey[2];
 
-
-/* functions to refresh disk quota model*/
 static void report_active_table_SmgrStat(SMgrRelation reln);
-void init_relfilenode_key(void);
 HTAB* get_active_tables(void);
 void init_active_table_hook(void);
 void init_shm_worker_active_tables(void);
 void init_lock_active_tables(void);
+void init_relfilenode_key(void);
 
+/*
+ * Register smgr hook to detect active table.
+ */
 void
 init_active_table_hook(void)
 {
@@ -51,14 +50,13 @@ init_active_table_hook(void)
 }
 
 /*
- *
+ * Init active_tables_map shared memory
  */
 void
 init_shm_worker_active_tables(void)
 {
     HASHCTL ctl;
     memset(&ctl, 0, sizeof(ctl));
-
 
     ctl.keysize = sizeof(DiskQuotaActiveTableEntry);
     ctl.entrysize = sizeof(DiskQuotaActiveTableEntry);
@@ -69,9 +67,11 @@ init_shm_worker_active_tables(void)
                 diskquota_max_active_tables,
                 &ctl,
                 HASH_ELEM | HASH_FUNCTION);
-
 }
 
+/*
+ * Init lock of active table map 
+ */
 void init_lock_active_tables(void)
 {
 	bool found = false;
@@ -84,8 +84,10 @@ void init_lock_active_tables(void)
         active_table_shm_lock->lock = &(GetNamedLWLockTranche("disk_quota_active_table_shm_lock"))->lock;
     }
 }
+
 /*
- *
+ * Init relfilenode key to index search table oid 
+ * given relfilenode and tablespace.
  */
 void
 init_relfilenode_key(void)
@@ -107,12 +109,14 @@ init_relfilenode_key(void)
 
 	relfilenode_skey[0].sk_attno = Anum_pg_class_reltablespace;
 	relfilenode_skey[1].sk_attno = Anum_pg_class_relfilenode;
-
 }
 
-
 /*
- *
+ * Get local active table with table oid and table size info.
+ * This function first copies active table map from shared memory 
+ * to local active table map with refilenode info. Then traverses
+ * the local map and find corresponding table oid and table file 
+ * size. Finnaly stores them into local active table map and return.
  */
 HTAB* get_active_tables()
 {
@@ -175,13 +179,10 @@ HTAB* get_active_tables()
 								HASH_ELEM | HASH_CONTEXT | HASH_FUNCTION);
 
 
+	relation = heap_open(RelationRelationId, AccessShareLock);
 	/* traverse local active table map and calculate their file size. */
 	hash_seq_init(&iter, local_active_table_file_map);
-
-	/* check for plain relations by looking in pg_class */
-	relation = heap_open(RelationRelationId, AccessShareLock);
-
-	/* Scan whole HTAB, get the Oid of each table and calculate the size of them */
+	/* scan whole local map, get the oid of each table and calculate the size of them */
 	while ((active_table_file_entry = (DiskQuotaActiveTableFileEntry *) hash_seq_search(&iter)) != NULL)
 	{
 		Size tablesize;
@@ -225,12 +226,10 @@ HTAB* get_active_tables()
 			active_table_entry->tablesize = tablesize;
 		}
 		systable_endscan(relScan);
-		elog(DEBUG1,"active%u:%ld",relOid, tablesize);
 	}
-
+	elog(DEBUG1, "active table number is:%ld", hash_get_num_entries(local_active_table_file_map));
 	heap_close(relation, AccessShareLock);
 	hash_destroy(local_active_table_file_map);
-
 	return local_active_table_stats_map;
 }
 
@@ -250,6 +249,7 @@ report_active_table_SmgrStat(SMgrRelation reln)
 	if (prev_SmgrStat_hook)
 		(*prev_SmgrStat_hook)(reln);
 
+	MemSet(&item, 0, sizeof(DiskQuotaActiveTableFileEntry));
 	item.dbid = reln->smgr_rnode.node.dbNode;
 	item.relfilenode = reln->smgr_rnode.node.relNode;
 	item.tablespaceoid = reln->smgr_rnode.node.spcNode;

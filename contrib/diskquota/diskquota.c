@@ -121,7 +121,7 @@ _PG_init(void)
 							"max number of active tables monitored by disk-quota",
 							NULL,
 							&diskquota_max_active_tables,
-							8 * 1024,
+							8 * 1024 * 10,
 							1,
 							INT_MAX,
 							PGC_SIGHUP,
@@ -261,7 +261,7 @@ disk_quota_launcher_main(Datum main_arg)
 	List *dblist;
 	ListCell *cell;
 	HASHCTL		hash_ctl;
-
+	int db_count = 0;
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, disk_quota_sighup);
@@ -271,7 +271,7 @@ disk_quota_launcher_main(Datum main_arg)
 	BackgroundWorkerUnblockSignals();
 
 	/* Connect to our database */
-	BackgroundWorkerInitializeConnection("postgres", NULL, 0);
+	//BackgroundWorkerInitializeConnection("postgres", NULL, 0);
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = NAMEDATALEN;
@@ -288,6 +288,8 @@ disk_quota_launcher_main(Datum main_arg)
 	{
 		char *db_name;
 
+		if (db_count >= 10)
+			break;
 		db_name = (char *)lfirst(cell);
 		if (db_name == NULL || *db_name == '\0')
 		{
@@ -295,6 +297,7 @@ disk_quota_launcher_main(Datum main_arg)
 			continue;
 		}
 		start_worker(db_name);
+		db_count++;
 	}
 	/*
 	 * Main loop: do this until the SIGTERM handler tells us to terminate
@@ -369,6 +372,7 @@ refresh_worker_list(void)
 	bool found;
 	DiskQuotaWorkerEntry *hash_entry;
 	HASH_SEQ_STATUS status;
+	int db_count = 0;
 
 	removed_workerlist = NIL;
 	monitor_dblist = get_database_list();
@@ -387,6 +391,8 @@ refresh_worker_list(void)
 		{
 			char *db_name;
 
+			if (db_count >= 10)
+				break;
 			db_name = (char *)lfirst(cell);
 			if (db_name == NULL || *db_name == '\0')
 			{
@@ -423,12 +429,15 @@ refresh_worker_list(void)
 	}
 
 	/* step 2: start new worker which first appears in monitor database list. */
+	db_count = 0;
 	foreach(cell, monitor_dblist)
 	{
 		DiskQuotaWorkerEntry* workerentry;
 		char *db_name;
 		pid_t pid;
 
+		if (db_count >= 10)
+			break;
 		db_name = (char *)lfirst(cell);
 		if (db_name == NULL || *db_name == '\0')
 		{

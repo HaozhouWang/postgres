@@ -3,7 +3,7 @@ Diskquota is an extension that provides disk usage enforcement for database obje
 
 This project is inspired by Heikki's pg_quota project (link: https://github.com/hlinnaka/pg_quota) and enhance it to support different kinds of DDL and DML which may change the disk usage of database objects. 
 
-Diskquota is a soft limit of disk uages. It has some delay to detect the schemas or roles whose quota limit is exceeded. Here 'soft limit' support two kinds of encforcement:  Query loading data into out-of-quota schema/role will be forbidden before query is running. Query loading data into schema/role with rooms will be cancelled when the quota limit is reached dynamically during the query is running. 
+Diskquota is a soft limit of disk uages. It has some delay to detect the schemas or roles whose quota limit is exceeded. Here 'soft limit' supports two kinds of encforcement:  Query loading data into out-of-quota schema/role will be forbidden before query is running. Query loading data into schema/role with rooms will be cancelled when the quota limit is reached dynamically during the query is running. 
 
 # Design
 Diskquota extension is based on background worker framework in Postgresql.
@@ -19,21 +19,24 @@ Currently, we support to monitor at most 10 databases at the same time.
 Worker processes are responsible for monitoring the disk usage of schemas and roles for the target database, 
 and do quota enfocement. It will periodically recalcualte the table size of active tables, and update their corresponding schema or owner's disk usage. Then compare with quota limit for those schemas or roles. If exceeds the limit, put the corresponding schemas or roles into the blacklist in shared memory. Schemas or roles in blacklist are used to do query enforcement to cancel queries which plan to load data into these schemas or roles.
 
+## Active table
 Active tables are the tables whose table size may change in the last quota check interval. We use hooks in smgecreate(), smgrextend() and smgrtruncate() to detect active tables and store them(currently relfilenode) in the shared memory. Diskquota worker process will periodically consuming active table in shared memories, convert relfilenode to relaton oid, and calcualte table size by calling pg_total_relation_size(), which will sum the size of table(base, vm, fsm), toast, index.
 
+## Enforcement
 Enforcement is implemented as hooks. There are two kinds of enforcement hooks: enforcement before query is running and
 enforcement during query is running.
-The first one is implemented at ExecCheckPerms
-The second one is implemented at GetBuffer
+The 'before query' one is implemented at ExecutorCheckPerms_hook in function ExecCheckRTPerms()
+The 'during query' one is implemented at BufferExtendCheckPerms_hook in function ReadBufferExtended(). Note that the implementation of BufferExtendCheckPerms_hook will firstly check whether function request a new block, if not skip directyly.
 
-Quota limit of schema or role is stored in table 'quota_config' in 'diskquota' schema in monitored database. So each database store and manage its own disk quota configuration. Note that although role is a db object in cluster level, we limit the diskquota of a role to be database specific. That is to say, a role may has different quota limit on different databases and their disk usage is isolated between databases.
+## Quota setting store
+Quota limit of a schema or a role is stored in table 'quota_config' in 'diskquota' schema in monitored database. So each database stores and manages its own disk quota configuration. Note that although role is a db object in cluster level, we limit the diskquota of a role to be database specific. That is to say, a role may has different quota limit on different databases and their disk usage is isolated between databases.
 
 # Install
 1. Compile and install disk quota.
 ```
 cd contrib/disk_quota; 
 make; 
-make install
+make install;
 ```
 2. Config postgres.conf
 ```
@@ -93,9 +96,9 @@ make installcheck
 
 # Benchmark & Performence Test
 ## Cost of diskquota worker.
-10K user tables
-100K user tables
-100K user tables with 1K active tables.
+During each refresh interval, the disk quota worker need to refresh the disk quota model.
+It take less than 100ms under 100K user tables with no avtive tables.
+It take less than 200ms under 100K user tables with 1K active tables.
 
 ## Impact on OLTP queries
 We test OLTP queries to measure the impact of enabling diskquota feature. The range is from 2k tables to 10k tables.
