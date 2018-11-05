@@ -17,10 +17,10 @@ terminate workers which are disabled when DBA modify diskquota.monitor_databases
 There are many worker processes, one for each database which is listed in diskquota.monitor_databases.
 Currently, we support to monitor at most 10 databases at the same time.
 Worker processes are responsible for monitoring the disk usage of schemas and roles for the target database, 
-and do quota enfocement. It will periodically recalcualte the table size of active tables, and update their corresponding schema or owner's disk usage. Then compare with quota limit for those schemas or roles. If exceeds the limit, put the corresponding schemas or roles into the blacklist in shared memory. Schemas or roles in blacklist are used to do query enforcement to cancel queries which plan to load data into these schemas or roles.
+and do quota enfocement. It will periodically (can be set via diskquota.naptime) recalcualte the table size of active tables, and update their corresponding schema or owner's disk usage. Then compare with quota limit for those schemas or roles. If exceeds the limit, put the corresponding schemas or roles into the blacklist in shared memory. Schemas or roles in blacklist are used to do query enforcement to cancel queries which plan to load data into these schemas or roles.
 
 ## Active table
-Active tables are the tables whose table size may change in the last quota check interval. We use hooks in smgecreate(), smgrextend() and smgrtruncate() to detect active tables and store them(currently relfilenode) in the shared memory. Diskquota worker process will periodically consuming active table in shared memories, convert relfilenode to relaton oid, and calcualte table size by calling pg_total_relation_size(), which will sum the size of table(base, vm, fsm), toast, index.
+Active tables are the tables whose table size may change in the last quota check interval. We use hooks in smgecreate(), smgrextend() and smgrtruncate() to detect active tables and store them(currently relfilenode) in the shared memory. Diskquota worker process will periodically consuming active table in shared memories, convert relfilenode to relaton oid, and calcualte table size by calling pg_total_relation_size(), which will sum the size of table(including: base, vm, fsm, toast and index).
 
 ## Enforcement
 Enforcement is implemented as hooks. There are two kinds of enforcement hooks: enforcement before query is running and
@@ -34,25 +34,34 @@ Quota limit of a schema or a role is stored in table 'quota_config' in 'diskquot
 # Install
 1. Compile and install disk quota.
 ```
-cd contrib/disk_quota; 
+cd contrib/diskquota; 
 make; 
 make install;
 ```
-2. Config postgres.conf
+2. Config postgresql.conf
 ```
-# enable disk_quota in preload library.
-shared_preload_libraries = 'disk_quota'
-# set monitored databases and naptime to refresh the disk quota stats.
+# enable diskquota in preload library.
+shared_preload_libraries = 'diskquota'
+# set monitored databases
 diskquota.monitor_databases = 'postgres'
+# set naptime (second) to refresh the disk quota stats periodically
 diskquota.naptime = 2
 ```
-3. Create disk_quota extension in monitored database.
+3. Create diskquota extension in monitored database.
 ```
-create extension disk_quota;
+create extension diskquota;
+```
+
+4. Reload database configuraion
+```
+# reset monitored database list in postgresql.conf
+diskquota.monitor_databases = 'postgres, postgres2'
+# reload configuration
+pg_ctl reload
 ```
 
 # Usage
-1. Set schema quota limit using diskquota.set_schema_quota
+1. Set/update/delete schema quota limit using diskquota.set_schema_quota
 ```
 create schema s1;
 select diskquota.set_schema_quota('s1', '1 MB');
@@ -65,10 +74,16 @@ insert into a select generate_series(1,100);
 insert into a select generate_series(1,10000000);
 # insert small data failed
 insert into a select generate_series(1,100);
+
+# delete quota configuration
+select diskquota.set_schema_quota('s1', '-1');
+# insert small data succeed
+select pg_sleep(5);
+insert into a select generate_series(1,100);
 reset search_path;
 ```
 
-2. Set role quota limit using diskquota.set_role_quota
+2. Set/update/delete role quota limit using diskquota.set_role_quota
 ```
 create role u1 nologin;
 create table b (i int);
@@ -81,23 +96,34 @@ insert into b select generate_series(1,100);
 insert into b select generate_series(1,10000000);
 # insert small data failed
 insert into b select generate_series(1,100);
+
+# delete quota configuration
+select diskquota.set_role_quota('u1', '-1');
+# insert small data succeed
+select pg_sleep(5);
+insert into a select generate_series(1,100);
+reset search_path;
 ```
 
 3. Show schema quota limit and current usage
 ```
 select diskquota.show_schema_quota();
 ```
+
+
 # Test
 Run regression tests.
 ```
-cd contrib/disk_quota; 
+cd contrib/diskquota; 
 make installcheck
 ```
 
 # Benchmark & Performence Test
 ## Cost of diskquota worker.
 During each refresh interval, the disk quota worker need to refresh the disk quota model.
+
 It take less than 100ms under 100K user tables with no avtive tables.
+
 It take less than 200ms under 100K user tables with 1K active tables.
 
 ## Impact on OLTP queries
@@ -142,6 +168,7 @@ table size to its owner's quota. While for schema, temp table is located under n
 so temp table size will not sum to the current schema's qouta.
 
 # Known Issue.
+
 1. Since Postgresql doesn't support READ UNCOMMITTED isolation level, 
 our implementation cannot detect the new created table inside an
 uncommitted transaction(See below example). Hence enforcement on 
@@ -163,6 +190,7 @@ insert into b select generate_series(1,200000);
 insert into a select generate_series(1,200000);
 END;
 ```
+
 One solution direction is that we calculate the additional 'uncommited data size' 
 for schema and role in worker process. Since pg_total_relation_size need to hold 
 AccessShareLock to relation(And worker process don't even know this reloid exists), 
@@ -170,5 +198,13 @@ we need to skip it, and call stat() directly with tolerant to file unlink.
 Skip lock is dangerous and we plan to leave it as known issue at current stage.
 
 2. Out of shared memory
-Diskquota extension uses two kinds of shared memories. 
+
+Diskquota extension uses two kinds of shared memories. One is used to save black list and another one is
+to save active table list. The black list shared memory can support up to 1 MiB database objects which exceed quota limit.
+The active table list shared memory can support up to 1 MiB active tables in default, and user could reset it in GUC diskquota_max_active_tables.
+
+As shared memory is pre-allocated, user needs to restart DB if they updated this GUC value. 
+
+If black list shared memory is full, it's possible to load data into some schemas or roles which quota limit are reached.
+If active table shared memory is full, disk quota worker may failed to detect the corresponding disk usage change in time.
 
